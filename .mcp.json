@@ -1,0 +1,11 @@
+{
+  "brainstew": {
+    "command": "node",
+    "args": ["/Users/jacobnorgord/Downloads/Code/Automation Interns/Efficient Orchestration Systems/dist/index.js"],
+    "env": {
+      "OPENAI_API_KEY": "${OPENAI_API_KEY}",
+      "GEMINI_API_KEY": "${GEMINI_API_KEY}",
+      "XAI_API_KEY": "${XAI_API_KEY}"
+    }
+  }
+}

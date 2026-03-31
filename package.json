@@ -1,0 +1,30 @@
+{
+  "name": "brainstew",
+  "version": "0.1.0",
+  "description": "Multi-model deliberation MCP server — fans out prompts to GPT, Gemini, and Grok, returns structured responses for Claude to synthesize",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts"
+  },
+  "keywords": [
+    "mcp",
+    "ai",
+    "orchestration",
+    "multi-model"
+  ],
+  "author": "Automation Interns",
+  "license": "MIT",
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "openai": "^6.33.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2"
+  }
+}
