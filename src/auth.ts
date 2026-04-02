@@ -3,6 +3,7 @@ import { createServer, type Server } from "node:http";
 import { randomBytes, createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { exec } from "node:child_process";
 
 // --- Types ---
 
@@ -32,12 +33,32 @@ export interface ProviderOAuthConfig {
   usePkce: boolean;
 }
 
-// --- Credential storage ---
+// --- Credential storage (keychain-first, file fallback) ---
 
+const KEYCHAIN_SERVICE = "brainstew-mcp";
+const KEYCHAIN_ACCOUNT = "auth-store";
 const AUTH_DIR = join(homedir(), ".brainstew");
 const AUTH_FILE = join(AUTH_DIR, "auth.json");
 
-export async function loadAuthStore(): Promise<AuthStore> {
+let keychainAvailable: boolean | null = null;
+
+async function getKeyring(): Promise<typeof import("@napi-rs/keyring") | null> {
+  if (keychainAvailable === false) return null;
+  try {
+    const keyring = await import("@napi-rs/keyring");
+    keychainAvailable = true;
+    return keyring;
+  } catch {
+    keychainAvailable = false;
+    console.error(
+      "[brainstew] OS keychain unavailable — falling back to file-based credential storage"
+    );
+    return null;
+  }
+}
+
+// File-based fallback (used when keychain is unavailable)
+async function loadFromFile(): Promise<AuthStore> {
   try {
     const data = await readFile(AUTH_FILE, "utf-8");
     return JSON.parse(data) as AuthStore;
@@ -46,9 +67,49 @@ export async function loadAuthStore(): Promise<AuthStore> {
   }
 }
 
-export async function saveAuthStore(store: AuthStore): Promise<void> {
+async function saveToFile(store: AuthStore): Promise<void> {
   await mkdir(AUTH_DIR, { recursive: true, mode: 0o700 });
   await writeFile(AUTH_FILE, JSON.stringify(store, null, 2), { mode: 0o600 });
+}
+
+export async function loadAuthStore(): Promise<AuthStore> {
+  const keyring = await getKeyring();
+  if (keyring) {
+    try {
+      const entry = new keyring.Entry(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT);
+      const data = entry.getPassword();
+      if (!data) throw new Error("No keychain entry");
+      return JSON.parse(data) as AuthStore;
+    } catch {
+      // No keychain entry yet — check file for migration
+      const fileStore = await loadFromFile();
+      if (Object.keys(fileStore).length > 0) {
+        // Migrate existing file credentials to keychain
+        await saveAuthStore(fileStore);
+        console.error(
+          "[brainstew] Migrated credentials from file to OS keychain"
+        );
+      }
+      return fileStore;
+    }
+  }
+  return loadFromFile();
+}
+
+export async function saveAuthStore(store: AuthStore): Promise<void> {
+  const keyring = await getKeyring();
+  if (keyring) {
+    try {
+      const entry = new keyring.Entry(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT);
+      entry.setPassword(JSON.stringify(store));
+      return;
+    } catch (err) {
+      console.error(
+        `[brainstew] Keychain write failed, falling back to file: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  }
+  await saveToFile(store);
 }
 
 // --- PKCE helpers ---
@@ -135,12 +196,31 @@ export async function performOAuthLogin(
     params.set("code_challenge_method", "S256");
   }
 
+  // Google requires access_type=offline to issue refresh tokens
+  if (providerId === "google") {
+    params.set("access_type", "offline");
+    params.set("prompt", "consent");
+  }
+
   const authorizationUrl = `${config.authUrl}?${params.toString()}`;
 
-  // Log for user to open (MCP server can't open browser directly)
+  // Attempt to open browser automatically (best practice for CLI OAuth)
+  // Falls back to logging the URL if browser launch fails
   console.error(
-    `[brainstew] OAuth login for ${providerId}: open this URL in your browser:\n${authorizationUrl}`
+    `[brainstew] OAuth login for ${providerId}: opening browser...`
   );
+  try {
+    const openCmd =
+      process.platform === "darwin"
+        ? "open"
+        : process.platform === "win32"
+          ? "start"
+          : "xdg-open";
+    exec(`${openCmd} "${authorizationUrl}"`);
+  } catch {
+    // Browser launch failed — user will need to open manually
+  }
+  console.error(`[brainstew] If browser didn't open, visit:\n${authorizationUrl}`);
 
   // Start callback server and wait
   const { code, state: returnedState, server } = await startCallbackServer(
@@ -240,26 +320,11 @@ export async function getAccessToken(
   config: ProviderOAuthConfig,
   envApiKey?: string
 ): Promise<{ token: string; type: "oauth" | "apikey" }> {
-  // Priority 1: env var API key
-  if (envApiKey) {
-    return { token: envApiKey, type: "apikey" };
-  }
-
-  // Priority 2: stored credentials
+  // Priority 1: Stored OAuth tokens (preferred — most secure, auto-refreshable)
   const store = await loadAuthStore();
   const creds = store[providerId];
 
-  if (!creds) {
-    throw new Error(
-      `No credentials for ${providerId}. Run 'brainstew login ${providerId}' or set the API key env var.`
-    );
-  }
-
-  if (creds.type === "apikey" && creds.apiKey) {
-    return { token: creds.apiKey, type: "apikey" };
-  }
-
-  if (creds.type === "oauth" && creds.oauth) {
+  if (creds?.type === "oauth" && creds.oauth?.accessToken) {
     // Check expiry with 60s buffer
     const isExpired =
       creds.oauth.expiresAt && Date.now() > creds.oauth.expiresAt - 60_000;
@@ -271,16 +336,29 @@ export async function getAccessToken(
         await saveAuthStore(store);
         return { token: refreshed.accessToken, type: "oauth" };
       } catch {
-        throw new Error(
-          `OAuth token expired and refresh failed for ${providerId}. Run 'brainstew login ${providerId}'`
+        // OAuth refresh failed — fall through to API key fallback
+        console.error(
+          `[brainstew] OAuth refresh failed for ${providerId}, falling back to API key`
         );
       }
+    } else if (!isExpired) {
+      return { token: creds.oauth.accessToken, type: "oauth" };
     }
-
-    return { token: creds.oauth.accessToken, type: "oauth" };
   }
 
-  throw new Error(`Invalid credential state for ${providerId}`);
+  // Priority 2: Stored API key
+  if (creds?.type === "apikey" && creds.apiKey) {
+    return { token: creds.apiKey, type: "apikey" };
+  }
+
+  // Priority 3: Environment variable API key (fallback)
+  if (envApiKey) {
+    return { token: envApiKey, type: "apikey" };
+  }
+
+  throw new Error(
+    `No credentials for ${providerId}. Use the brainstew_login tool to authenticate via OAuth, or set the API key env var.`
+  );
 }
 
 // --- Provider OAuth configs ---

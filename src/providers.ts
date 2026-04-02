@@ -176,8 +176,18 @@ const providers: Record<ModelKey, (prompt: string) => Promise<ModelResponse>> =
 
 export async function queryAllModels(
   prompt: string,
-  models: ModelKey[]
+  models: ModelKey[],
+  onModelComplete?: (completed: number, total: number, model: string) => void
 ): Promise<ModelResponse[]> {
-  const queries = models.map((key) => providers[key](prompt));
+  const total = models.length;
+  let completed = 0;
+
+  const queries = models.map(async (key) => {
+    const result = await providers[key](prompt);
+    completed++;
+    onModelComplete?.(completed, total, result.model);
+    return result;
+  });
+
   return Promise.all(queries);
 }
