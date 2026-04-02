@@ -13,21 +13,23 @@ npm run build
 
 ### Add to Claude Code
 
+If you cloned the repo and open Claude Code from the project directory, the `.mcp.json` is already included — just set your API keys:
+
 ```bash
 claude mcp add brainstew \
   -e OPENAI_API_KEY=sk-your-key \
   -e GEMINI_API_KEY=your-key \
   -e XAI_API_KEY=xai-your-key \
-  -- node /path/to/brainstew/dist/index.js
+  -- node dist/index.js
 ```
 
-Or add to your project's `.mcp.json`:
+Or edit `.mcp.json` in the project root (already included in the repo):
 
 ```json
 {
   "brainstew": {
     "command": "node",
-    "args": ["/path/to/brainstew/dist/index.js"],
+    "args": ["dist/index.js"],
     "env": {
       "OPENAI_API_KEY": "sk-your-key",
       "GEMINI_API_KEY": "your-key",
