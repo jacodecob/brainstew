@@ -27,13 +27,16 @@ Or edit `.mcp.json` in the project root (already included in the repo):
 
 ```json
 {
-  "brainstew": {
-    "command": "node",
-    "args": ["dist/index.js"],
-    "env": {
-      "OPENAI_API_KEY": "sk-your-key",
-      "GEMINI_API_KEY": "your-key",
-      "XAI_API_KEY": "xai-your-key"
+  "mcpServers": {
+    "brainstew": {
+      "command": "node",
+      "args": ["dist/index.js"],
+      "env": {
+        "OPENAI_API_KEY": "sk-your-key",
+        "GEMINI_API_KEY": "your-key",
+        "XAI_API_KEY": "xai-your-key",
+        "GOOGLE_OAUTH_CLIENT_ID": "your-google-oauth-client-id"
+      }
     }
   }
 }
@@ -55,7 +58,7 @@ Most providers require API keys. Get yours and pass them as env vars:
 | Google (Gemini) | `GEMINI_API_KEY` | https://aistudio.google.com/apikey |
 | xAI (Grok) | `XAI_API_KEY` | https://console.x.ai |
 
-You can set env vars in the MCP config (see above), in a `.env` file (`cp .env.example .env`), or in your shell.
+You can set env vars in the MCP config (see above), in a `.env` file at the project root (`cp .env.example .env`), or in your shell. Brainstew auto-loads the project root `.env` on startup without needing `node --env-file`.
 
 ### Guided setup
 

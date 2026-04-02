@@ -1,11 +1,14 @@
 {
-  "brainstew": {
-    "command": "node",
-    "args": ["dist/index.js"],
-    "env": {
-      "OPENAI_API_KEY": "${OPENAI_API_KEY}",
-      "GEMINI_API_KEY": "${GEMINI_API_KEY}",
-      "XAI_API_KEY": "${XAI_API_KEY}"
+  "mcpServers": {
+    "brainstew": {
+      "command": "node",
+      "args": ["dist/index.js"],
+      "env": {
+        "OPENAI_API_KEY": "${OPENAI_API_KEY}",
+        "GEMINI_API_KEY": "${GEMINI_API_KEY}",
+        "XAI_API_KEY": "${XAI_API_KEY}",
+        "GOOGLE_OAUTH_CLIENT_ID": "${GOOGLE_OAUTH_CLIENT_ID}"
+      }
     }
   }
 }

@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -7,10 +10,53 @@ import {
   awaitOAuthCallback,
   getActivePendingFlow,
   loadAuthStore,
-  saveAuthStore,
   PROVIDER_OAUTH_CONFIGS,
   PROVIDER_AUTH_SUPPORT,
 } from "./auth.js";
+
+loadProjectEnv();
+
+function loadProjectEnv(): void {
+  const moduleDir = dirname(fileURLToPath(import.meta.url));
+  const projectEnvPath = join(dirname(moduleDir), ".env");
+
+  try {
+    const raw = readFileSync(projectEnvPath, "utf-8");
+
+    for (const line of raw.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+
+      const separatorIndex = trimmed.indexOf("=");
+      if (separatorIndex <= 0) continue;
+
+      const key = trimmed.slice(0, separatorIndex).trim();
+      if (!key || process.env[key] !== undefined) continue;
+
+      let value = trimmed.slice(separatorIndex + 1).trim();
+      if (
+        (value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'"))
+      ) {
+        value = value.slice(1, -1);
+      }
+
+      process.env[key] = value;
+    }
+  } catch (err: unknown) {
+    if (
+      err instanceof Error &&
+      "code" in err &&
+      err.code === "ENOENT"
+    ) {
+      return;
+    }
+
+    console.error(
+      `[brainstew] Failed to load project .env: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+}
 
 const server = new McpServer(
   {
