@@ -7,16 +7,17 @@ import {
   loadAuthStore,
   saveAuthStore,
   PROVIDER_OAUTH_CONFIGS,
+  PROVIDER_AUTH_SUPPORT,
 } from "./auth.js";
 
 const server = new McpServer(
   {
     name: "brainstew",
-    version: "0.3.0",
+    version: "0.4.0",
   },
   {
     instructions:
-      "Brainstew is a multi-model deliberation server. Call brainstew_council to fan out a prompt to GPT, Gemini, and Grok in parallel. If a provider returns an auth error, call brainstew_login to authenticate via OAuth. Use brainstew_auth_status to check credential state before troubleshooting.",
+      "Brainstew is a multi-model deliberation server. Call brainstew_council to fan out a prompt to GPT, Gemini, and Grok in parallel. On first use, call brainstew_setup to check which providers are configured and guide the user through setup. Do NOT call brainstew_login unless the user explicitly asks for OAuth — most providers use API keys. Use brainstew_auth_status to check credential state.",
   }
 );
 
@@ -26,7 +27,7 @@ server.registerTool(
   "brainstew_council",
   {
     description:
-      "Fan out a prompt to multiple AI models (GPT, Gemini, Grok) in parallel and return their diverse perspectives. Use this for complex questions, architectural decisions, or any situation where multiple viewpoints improve synthesis. Does NOT store or modify data — read-only queries to external model APIs. If a model returns an auth error, call brainstew_login to re-authenticate that provider via OAuth.",
+      "Fan out a prompt to multiple AI models (GPT, Gemini, Grok) in parallel and return their diverse perspectives. Use this for complex questions, architectural decisions, or any situation where multiple viewpoints improve synthesis. Does NOT store or modify data — read-only queries to external model APIs. If a model returns an auth error, call brainstew_setup for configuration guidance.",
     inputSchema: {
       prompt: z
         .string()
@@ -108,18 +109,84 @@ server.registerTool(
   }
 );
 
-// --- Login tool ---
+// --- Setup tool (guided first-run) ---
+
+server.registerTool(
+  "brainstew_setup",
+  {
+    description:
+      "Check which providers are configured and guide setup. Call this on first use or when providers return auth errors. Shows what's configured, what's missing, and tells the user exactly what env vars to set. Do NOT call brainstew_login instead — most providers require API keys, not OAuth.",
+    annotations: {
+      readOnlyHint: true,
+    },
+  },
+  async () => {
+    const store = await loadAuthStore();
+    const lines: string[] = ["# Brainstew Setup\n"];
+
+    const configured: string[] = [];
+    const missing: string[] = [];
+
+    for (const [id, info] of Object.entries(PROVIDER_AUTH_SUPPORT)) {
+      const hasEnvKey = !!process.env[info.envVar];
+      const stored = store[id];
+      const oauthActive =
+        stored?.type === "oauth" &&
+        stored.oauth?.accessToken &&
+        (!stored.oauth.expiresAt || stored.oauth.expiresAt > Date.now());
+      const hasStoredKey = stored?.type === "apikey" && !!stored.apiKey;
+
+      if (oauthActive || hasEnvKey || hasStoredKey) {
+        const method = oauthActive
+          ? "OAuth"
+          : hasEnvKey
+            ? `API key (${info.envVar})`
+            : "API key (stored)";
+        configured.push(`- **${info.name}**: ${method}`);
+      } else {
+        const howTo = info.oauth
+          ? `Set \`${info.envVar}\` env var (${info.keyUrl}), or use \`brainstew_login\` for OAuth`
+          : `Set \`${info.envVar}\` env var — get a key at ${info.keyUrl}`;
+        missing.push(`- **${info.name}**: ${howTo}`);
+      }
+    }
+
+    if (configured.length > 0) {
+      lines.push("## Ready to use\n");
+      lines.push(...configured);
+      lines.push("");
+    }
+
+    if (missing.length > 0) {
+      lines.push("## Needs configuration\n");
+      lines.push(...missing);
+      lines.push("");
+      lines.push(
+        "**To configure:** Ask the user to set the env vars listed above, then restart the MCP server. " +
+          "The user can add env vars to the MCP config in Claude Code settings, or to a `.env` file in the project."
+      );
+    } else {
+      lines.push("All providers are configured. Run `brainstew_council` to start deliberating.");
+    }
+
+    return {
+      content: [{ type: "text" as const, text: lines.join("\n") }],
+    };
+  }
+);
+
+// --- Login tool (OAuth only — limited to providers that actually support it) ---
 
 server.registerTool(
   "brainstew_login",
   {
     description:
-      "Authenticate with an AI provider via OAuth. Opens a browser-based PKCE OAuth flow. Use this when brainstew_council returns an auth error for a provider. Stores credentials in the OS keychain (falls back to ~/.brainstew/auth.json) with auto-refresh. Only supports OpenAI and Google — xAI/Grok requires the XAI_API_KEY env var (no OAuth).",
+      "Authenticate with a provider via OAuth. Only Google supports OAuth — OpenAI and xAI require API keys (use brainstew_setup for guidance). Do NOT call this unless the user explicitly asks for OAuth login. For most setups, API keys via env vars are simpler and recommended.",
     inputSchema: {
       provider: z
-        .enum(["openai", "google"])
+        .enum(["google"])
         .describe(
-          "Which provider to authenticate with. xAI/Grok does not support OAuth — use XAI_API_KEY env var instead."
+          "Which provider to authenticate with via OAuth. Only Google is supported. OpenAI and xAI use API keys only."
         ),
     },
     annotations: {
@@ -135,7 +202,19 @@ server.registerTool(
         content: [
           {
             type: "text" as const,
-            text: `Provider "${provider}" does not have OAuth configured. Use brainstew_auth_status to check which providers support OAuth.`,
+            text: `Provider "${provider}" does not support OAuth. Run brainstew_setup for configuration guidance.`,
+          },
+        ],
+      };
+    }
+
+    if (!config.clientId) {
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text" as const,
+            text: `OAuth for ${provider} requires a Google Cloud OAuth client ID. Set the GOOGLE_OAUTH_CLIENT_ID env var, or use an API key instead (set ${PROVIDER_AUTH_SUPPORT[provider]?.envVar ?? "the API key env var"}).`,
           },
         ],
       };
@@ -151,17 +230,19 @@ server.registerTool(
         content: [
           {
             type: "text" as const,
-            text: `Successfully authenticated with ${provider} via OAuth. Credentials stored securely in OS keychain. OAuth tokens will auto-refresh on expiry.`,
+            text: `Successfully authenticated with ${provider} via OAuth. Credentials stored securely in OS keychain. Tokens will auto-refresh on expiry.`,
           },
         ],
       };
     } catch (err: unknown) {
+      const info = PROVIDER_AUTH_SUPPORT[provider];
       return {
         isError: true,
         content: [
           {
             type: "text" as const,
-            text: `OAuth login failed for ${provider}: ${err instanceof Error ? err.message : String(err)}. Retry with brainstew_login or fall back to setting the API key env var.`,
+            text: `OAuth login failed for ${provider}: ${err instanceof Error ? err.message : String(err)}. ` +
+              (info ? `Alternative: set ${info.envVar} env var (${info.keyUrl}).` : "Try setting the API key env var instead."),
           },
         ],
       };
@@ -175,7 +256,7 @@ server.registerTool(
   "brainstew_auth_status",
   {
     description:
-      "Check which providers are authenticated and how (OAuth vs API key). Shows credential status, expiration, and OAuth support for all providers. Call this before troubleshooting auth issues.",
+      "Check which providers are authenticated and how (OAuth vs API key). Shows credential status, expiration, and auth method for all providers.",
     annotations: {
       readOnlyHint: true,
     },
@@ -184,34 +265,13 @@ server.registerTool(
     const store = await loadAuthStore();
     const lines: string[] = [
       "# Brainstew Auth Status\n",
-      "| Provider | Status | OAuth Support |",
-      "|----------|--------|---------------|",
+      "| Provider | Status | Auth Method |",
+      "|----------|--------|-------------|",
     ];
 
-    const providers = [
-      {
-        id: "openai",
-        name: "OpenAI (GPT)",
-        envVar: "OPENAI_API_KEY",
-        supportsOAuth: true,
-      },
-      {
-        id: "google",
-        name: "Google (Gemini)",
-        envVar: "GEMINI_API_KEY",
-        supportsOAuth: true,
-      },
-      {
-        id: "xai",
-        name: "xAI (Grok)",
-        envVar: "XAI_API_KEY",
-        supportsOAuth: false,
-      },
-    ];
-
-    for (const p of providers) {
-      const hasEnvKey = !!process.env[p.envVar];
-      const stored = store[p.id];
+    for (const [id, info] of Object.entries(PROVIDER_AUTH_SUPPORT)) {
+      const hasEnvKey = !!process.env[info.envVar];
+      const stored = store[id];
       const oauthActive =
         stored?.type === "oauth" &&
         stored.oauth?.accessToken &&
@@ -224,16 +284,16 @@ server.registerTool(
           : "unknown";
         status = `OAuth active (expires in ${expiresIn} min)`;
       } else if (hasEnvKey) {
-        status = `API key fallback (${p.envVar})`;
+        status = `Ready (${info.envVar})`;
       } else if (stored?.type === "apikey") {
-        status = "API key (stored)";
+        status = "Ready (stored key)";
       } else {
-        status = "Not configured — use brainstew_login or set env var";
+        status = "Not configured";
       }
 
-      lines.push(
-        `| ${p.name} | ${status} | ${p.supportsOAuth ? "Yes" : "No (API key only)"} |`
-      );
+      const method = info.oauth ? "API key or OAuth" : "API key only";
+
+      lines.push(`| ${info.name} | ${status} | ${method} |`);
     }
 
     return {

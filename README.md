@@ -14,7 +14,11 @@ npm run build
 ### Add to Claude Code
 
 ```bash
-claude mcp add brainstew node /path/to/brainstew/dist/index.js
+claude mcp add brainstew \
+  -e OPENAI_API_KEY=sk-your-key \
+  -e GEMINI_API_KEY=your-key \
+  -e XAI_API_KEY=xai-your-key \
+  -- node /path/to/brainstew/dist/index.js
 ```
 
 Or add to your project's `.mcp.json`:
@@ -25,9 +29,9 @@ Or add to your project's `.mcp.json`:
     "command": "node",
     "args": ["/path/to/brainstew/dist/index.js"],
     "env": {
-      "OPENAI_API_KEY": "${OPENAI_API_KEY}",
-      "GEMINI_API_KEY": "${GEMINI_API_KEY}",
-      "XAI_API_KEY": "${XAI_API_KEY}"
+      "OPENAI_API_KEY": "sk-your-key",
+      "GEMINI_API_KEY": "your-key",
+      "XAI_API_KEY": "xai-your-key"
     }
   }
 }
@@ -35,47 +39,51 @@ Or add to your project's `.mcp.json`:
 
 ### Add to other MCP hosts
 
-Brainstew uses stdio transport. Any MCP-compatible host (Codex, OpenCode, etc.) can launch it the same way — run `node dist/index.js` and communicate over stdin/stdout.
+Brainstew uses stdio transport. Any MCP-compatible host (Codex, OpenCode, etc.) can launch it the same way — run `node dist/index.js` and communicate over stdin/stdout. Pass API keys as environment variables.
 
 ## Authentication
 
-Brainstew uses **OAuth first, API keys as fallback**.
+### API keys (primary method)
 
-### Option A: OAuth (recommended)
+Most providers require API keys. Get yours and pass them as env vars:
 
-Once the server is running, ask your agent to call the `brainstew_login` tool:
+| Provider | Env Var | Get a key |
+|----------|---------|-----------|
+| OpenAI (GPT-4o) | `OPENAI_API_KEY` | https://platform.openai.com/api-keys |
+| Google (Gemini) | `GEMINI_API_KEY` | https://aistudio.google.com/apikey |
+| xAI (Grok) | `XAI_API_KEY` | https://console.x.ai |
 
-```
-Use brainstew_login to authenticate with openai
-```
+You can set env vars in the MCP config (see above), in a `.env` file (`cp .env.example .env`), or in your shell.
 
-This opens a browser-based PKCE OAuth flow. Tokens are stored securely in your OS keychain (macOS Keychain, libsecret, or Windows Credential Vault) and auto-refresh on expiry.
+### Guided setup
 
-OAuth is supported for **OpenAI** and **Google**. xAI/Grok requires an API key (no OAuth available).
-
-### Option B: API keys (fallback)
-
-Copy the example env file and fill in your keys:
-
-```bash
-cp .env.example .env
-```
+On first use, the agent will call `brainstew_setup` to check which providers are configured and guide the user through setup. You can also ask:
 
 ```
-OPENAI_API_KEY=sk-...    # https://platform.openai.com/api-keys
-GEMINI_API_KEY=...        # https://aistudio.google.com/apikey
-XAI_API_KEY=xai-...      # https://console.x.ai
+Run brainstew_setup to check my configuration
 ```
 
-API keys are checked **only if no valid OAuth token exists** for that provider.
+### OAuth (Google only, optional)
+
+Google Gemini optionally supports OAuth via PKCE. This requires a Google Cloud OAuth client ID:
+
+1. Create an OAuth client in [Google Cloud Console](https://console.cloud.google.com/apis/credentials)
+2. Set `GOOGLE_OAUTH_CLIENT_ID` env var
+3. Ask the agent to call `brainstew_login` with provider `google`
+
+OpenAI and xAI do **not** support OAuth for API access — API keys only.
 
 ### Credential priority
 
-1. Stored OAuth tokens (OS keychain)
+1. Stored OAuth tokens (OS keychain — Google only)
 2. Stored API keys
 3. Environment variable API keys
 
 ## Tools
+
+### `brainstew_setup`
+
+Guided first-run configuration. Shows which providers are ready and which need API keys, with direct links.
 
 ### `brainstew_council`
 
@@ -91,13 +99,7 @@ Returns both a text summary and typed `structuredContent` with per-model respons
 
 ### `brainstew_login`
 
-Authenticate with a provider via OAuth.
-
-```
-provider: "openai" | "google"
-```
-
-Opens a browser for consent, catches the redirect locally, stores tokens in the OS keychain.
+Authenticate with Google via OAuth (the only provider that supports it). Do not use for OpenAI or xAI.
 
 ### `brainstew_auth_status`
 
@@ -115,13 +117,14 @@ npm start      # run compiled output
 
 ```bash
 npx @modelcontextprotocol/inspector --cli --transport stdio -- node dist/index.js --method tools/list
+npx @modelcontextprotocol/inspector --cli --transport stdio -- node dist/index.js --method tools/call --tool-name brainstew_setup
 npx @modelcontextprotocol/inspector --cli --transport stdio -- node dist/index.js --method tools/call --tool-name brainstew_auth_status
 ```
 
 ## Architecture
 
 - `src/index.ts` — MCP server, tool registration, formatting
-- `src/auth.ts` — OAuth PKCE flow, keychain storage, token refresh
+- `src/auth.ts` — OAuth PKCE flow, keychain storage, token refresh, credential resolution
 - `src/providers.ts` — Model-specific API calls (OpenAI, Google, xAI)
 - `docs/reference/` — Design decisions and auth strategy docs
 

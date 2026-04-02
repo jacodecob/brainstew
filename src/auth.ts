@@ -356,29 +356,58 @@ export async function getAccessToken(
     return { token: envApiKey, type: "apikey" };
   }
 
+  const support = PROVIDER_AUTH_SUPPORT[providerId];
+  const hint = support
+    ? support.oauth
+      ? `Use brainstew_login to authenticate via OAuth, or set ${support.envVar} env var.`
+      : `Set the ${support.envVar} env var (get a key at ${support.keyUrl}). This provider does not support OAuth.`
+    : `Set the API key env var for this provider.`;
+
   throw new Error(
-    `No credentials for ${providerId}. Use the brainstew_login tool to authenticate via OAuth, or set the API key env var.`
+    `No credentials for ${providerId}. ${hint} Run brainstew_setup for guided configuration.`
   );
 }
 
 // --- Provider OAuth configs ---
+// Only providers that genuinely support OAuth for API access are listed here.
+// OpenAI Chat Completions API does NOT support OAuth — API key only.
+// xAI does NOT support OAuth — API key only.
 
 export const PROVIDER_OAUTH_CONFIGS: Record<string, ProviderOAuthConfig> = {
-  openai: {
-    authUrl: "https://auth.openai.com/authorize",
-    tokenUrl: "https://auth.openai.com/oauth/token",
-    clientId: "app-brainstew",
-    scopes: ["openai.chat"],
-    callbackPort: 1455,
-    usePkce: true,
-  },
   google: {
     authUrl: "https://accounts.google.com/o/oauth2/v2/auth",
     tokenUrl: "https://oauth2.googleapis.com/token",
-    clientId: "", // Requires Google Cloud OAuth client ID
+    clientId: process.env.GOOGLE_OAUTH_CLIENT_ID ?? "",
     scopes: ["https://www.googleapis.com/auth/generative-language"],
     callbackPort: 1456,
     usePkce: true,
   },
-  // xAI does not support OAuth — API key only
+};
+
+// Which providers support which auth methods
+export const PROVIDER_AUTH_SUPPORT: Record<
+  string,
+  { oauth: boolean; apiKey: boolean; envVar: string; name: string; keyUrl: string }
+> = {
+  openai: {
+    oauth: false,
+    apiKey: true,
+    envVar: "OPENAI_API_KEY",
+    name: "OpenAI (GPT)",
+    keyUrl: "https://platform.openai.com/api-keys",
+  },
+  google: {
+    oauth: true,
+    apiKey: true,
+    envVar: "GEMINI_API_KEY",
+    name: "Google (Gemini)",
+    keyUrl: "https://aistudio.google.com/apikey",
+  },
+  xai: {
+    oauth: false,
+    apiKey: true,
+    envVar: "XAI_API_KEY",
+    name: "xAI (Grok)",
+    keyUrl: "https://console.x.ai",
+  },
 };

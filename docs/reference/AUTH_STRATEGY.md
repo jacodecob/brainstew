@@ -56,11 +56,13 @@ All OAuth providers use the **Authorization Code flow with PKCE** (Proof Key for
 
 ### Provider-Specific Configs
 
-| Provider | Auth URL | Client ID | Callback Port | PKCE |
-|----------|----------|-----------|---------------|------|
-| OpenAI | auth.openai.com/authorize | app-brainstew | 1455 | Yes |
-| Google | accounts.google.com/o/oauth2/v2/auth | (requires setup) | 1456 | Yes |
-| xAI | N/A | N/A | N/A | N/A |
+| Provider | OAuth | API Key | Notes |
+|----------|-------|---------|-------|
+| OpenAI (GPT) | **Not supported** | `OPENAI_API_KEY` | OpenAI Chat Completions API is API-key only. No public OAuth. |
+| Google (Gemini) | Yes (PKCE, port 1456) | `GEMINI_API_KEY` | Requires `GOOGLE_OAUTH_CLIENT_ID` from Google Cloud Console |
+| xAI (Grok) | **Not supported** | `XAI_API_KEY` | xAI does not offer OAuth |
+
+**Important:** OpenAI's `auth.openai.com` endpoints are for ChatGPT Actions/MCP servers authenticating users against *your* auth server — they do NOT issue API access tokens for Chat Completions.
 
 ## OAuth for Agent Tools (Claude Code, Codex, etc.)
 

@@ -56,9 +56,11 @@ If OAuth fails or isn't configured for a provider, fall through to API keys sile
 
 | Provider | OAuth | API Key | Notes |
 |----------|-------|---------|-------|
-| OpenAI (GPT) | Yes (PKCE) | Yes | OAuth preferred |
-| Google (Gemini) | Yes (PKCE) | Yes | Requires Google Cloud OAuth client ID |
-| xAI (Grok) | No | Yes | xAI does not offer OAuth — API key only |
+| OpenAI (GPT) | **No** | Yes | OpenAI API does not support OAuth for Chat Completions — API key only |
+| Google (Gemini) | Yes (PKCE) | Yes | OAuth requires a Google Cloud OAuth client ID |
+| xAI (Grok) | **No** | Yes | xAI does not offer OAuth — API key only |
+
+**Note:** Only Google currently supports OAuth. For OpenAI and xAI, API keys are the only option. The OAuth-first credential resolution still applies — if a stored OAuth token exists (Google), it takes priority over API keys.
 
 ## Implemented Features (v0.3.0)
 
