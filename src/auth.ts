@@ -378,7 +378,7 @@ export const PROVIDER_OAUTH_CONFIGS: Record<string, ProviderOAuthConfig> = {
     authUrl: "https://accounts.google.com/o/oauth2/v2/auth",
     tokenUrl: "https://oauth2.googleapis.com/token",
     clientId: process.env.GOOGLE_OAUTH_CLIENT_ID ?? "",
-    scopes: ["https://www.googleapis.com/auth/generative-language"],
+    scopes: ["https://www.googleapis.com/auth/cloud-platform"],
     callbackPort: 1456,
     usePkce: true,
   },
