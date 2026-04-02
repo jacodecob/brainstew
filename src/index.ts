@@ -3,7 +3,9 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { queryAllModels, type ModelResponse } from "./providers.js";
 import {
-  performOAuthLogin,
+  startOAuthLogin,
+  awaitOAuthCallback,
+  getActivePendingFlow,
   loadAuthStore,
   saveAuthStore,
   PROVIDER_OAUTH_CONFIGS,
@@ -13,7 +15,7 @@ import {
 const server = new McpServer(
   {
     name: "brainstew",
-    version: "0.4.0",
+    version: "0.5.0",
   },
   {
     instructions:
@@ -175,18 +177,18 @@ server.registerTool(
   }
 );
 
-// --- Login tool (OAuth only — limited to providers that actually support it) ---
+// --- Login tool (Phase 1: start OAuth, return URL immediately) ---
 
 server.registerTool(
   "brainstew_login",
   {
     description:
-      "Authenticate with a provider via OAuth. Only Google supports OAuth — OpenAI and xAI require API keys (use brainstew_setup for guidance). Do NOT call this unless the user explicitly asks for OAuth login. For most setups, API keys via env vars are simpler and recommended.",
+      "Start OAuth login for a provider. Returns an authorization URL that the USER must open in their browser. After calling this, tell the user to open the URL, then call brainstew_login_callback to complete authentication. Only Google supports OAuth — OpenAI and xAI require API keys (use brainstew_setup).",
     inputSchema: {
       provider: z
         .enum(["google"])
         .describe(
-          "Which provider to authenticate with via OAuth. Only Google is supported. OpenAI and xAI use API keys only."
+          "Which provider to authenticate with via OAuth. Only Google is supported."
         ),
     },
     annotations: {
@@ -209,40 +211,100 @@ server.registerTool(
     }
 
     if (!config.clientId) {
-      return {
-        isError: true,
-        content: [
-          {
-            type: "text" as const,
-            text: `OAuth for ${provider} requires a Google Cloud OAuth client ID. Set the GOOGLE_OAUTH_CLIENT_ID env var, or use an API key instead (set ${PROVIDER_AUTH_SUPPORT[provider]?.envVar ?? "the API key env var"}).`,
-          },
-        ],
-      };
-    }
-
-    try {
-      const credentials = await performOAuthLogin(provider, config);
-      const store = await loadAuthStore();
-      store[provider] = { type: "oauth", oauth: credentials };
-      await saveAuthStore(store);
-
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: `Successfully authenticated with ${provider} via OAuth. Credentials stored securely in OS keychain. Tokens will auto-refresh on expiry.`,
-          },
-        ],
-      };
-    } catch (err: unknown) {
       const info = PROVIDER_AUTH_SUPPORT[provider];
       return {
         isError: true,
         content: [
           {
             type: "text" as const,
-            text: `OAuth login failed for ${provider}: ${err instanceof Error ? err.message : String(err)}. ` +
-              (info ? `Alternative: set ${info.envVar} env var (${info.keyUrl}).` : "Try setting the API key env var instead."),
+            text: `OAuth for ${provider} requires a Google Cloud OAuth client ID. ` +
+              `Set the GOOGLE_OAUTH_CLIENT_ID env var first. ` +
+              (info ? `Or use an API key instead: set ${info.envVar} (${info.keyUrl}).` : ""),
+          },
+        ],
+      };
+    }
+
+    try {
+      const flow = startOAuthLogin(provider, config);
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: [
+              `## OAuth Login for ${PROVIDER_AUTH_SUPPORT[provider]?.name ?? provider}\n`,
+              `**The user must open this URL in their browser to authorize:**\n`,
+              flow.authorizationUrl,
+              `\nA browser window may have opened automatically. If not, the user needs to copy and open the URL above.`,
+              `\nAfter the user completes authorization in the browser, call **brainstew_login_callback** to finish authentication.`,
+            ].join("\n"),
+          },
+        ],
+      };
+    } catch (err: unknown) {
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text" as const,
+            text: `Failed to start OAuth flow for ${provider}: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        ],
+      };
+    }
+  }
+);
+
+// --- Login callback tool (Phase 2: await browser callback) ---
+
+server.registerTool(
+  "brainstew_login_callback",
+  {
+    description:
+      "Complete an OAuth login started by brainstew_login. Call this AFTER the user has opened the authorization URL in their browser and completed the consent flow. This waits for the browser redirect and exchanges the code for tokens.",
+    annotations: {
+      readOnlyHint: false,
+      openWorldHint: true,
+    },
+  },
+  async () => {
+    const flow = getActivePendingFlow();
+    if (!flow) {
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text" as const,
+            text: "No OAuth flow in progress. Call brainstew_login first to start one.",
+          },
+        ],
+      };
+    }
+
+    try {
+      const credentials = await awaitOAuthCallback();
+      const expiresIn = credentials.expiresAt
+        ? Math.round((credentials.expiresAt - Date.now()) / 60_000)
+        : "unknown";
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Successfully authenticated with ${flow.providerId} via OAuth. Token expires in ${expiresIn} minutes. Credentials stored securely in OS keychain.`,
+          },
+        ],
+      };
+    } catch (err: unknown) {
+      const info = PROVIDER_AUTH_SUPPORT[flow.providerId];
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text" as const,
+            text: `OAuth callback failed: ${err instanceof Error ? err.message : String(err)}. ` +
+              (info ? `Alternative: set ${info.envVar} env var (${info.keyUrl}).` : ""),
           },
         ],
       };

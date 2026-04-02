@@ -168,12 +168,40 @@ function startCallbackServer(
   });
 }
 
-// --- OAuth flow ---
+// --- OAuth flow (two-phase: start + await callback) ---
 
-export async function performOAuthLogin(
+export interface PendingOAuthFlow {
+  providerId: string;
+  authorizationUrl: string;
+  callbackPromise: Promise<OAuthCredentials>;
+  cancel: () => void;
+}
+
+// Track the active OAuth flow so the callback tool can await it
+let activePendingFlow: PendingOAuthFlow | null = null;
+
+export function getActivePendingFlow(): PendingOAuthFlow | null {
+  return activePendingFlow;
+}
+
+export function clearActivePendingFlow(): void {
+  if (activePendingFlow) {
+    activePendingFlow.cancel();
+    activePendingFlow = null;
+  }
+}
+
+/**
+ * Phase 1: Start the OAuth flow — returns the auth URL immediately.
+ * The callback server runs in the background; use awaitOAuthCallback() to wait for it.
+ */
+export function startOAuthLogin(
   providerId: string,
   config: ProviderOAuthConfig
-): Promise<OAuthCredentials> {
+): PendingOAuthFlow {
+  // Cancel any existing flow
+  clearActivePendingFlow();
+
   const state = generateState();
   const codeVerifier = config.usePkce ? generateCodeVerifier() : undefined;
   const codeChallenge = codeVerifier
@@ -182,7 +210,6 @@ export async function performOAuthLogin(
 
   const redirectUri = `http://127.0.0.1:${config.callbackPort}/callback`;
 
-  // Build authorization URL
   const params = new URLSearchParams({
     response_type: "code",
     client_id: config.clientId,
@@ -196,7 +223,6 @@ export async function performOAuthLogin(
     params.set("code_challenge_method", "S256");
   }
 
-  // Google requires access_type=offline to issue refresh tokens
   if (providerId === "google") {
     params.set("access_type", "offline");
     params.set("prompt", "consent");
@@ -204,11 +230,8 @@ export async function performOAuthLogin(
 
   const authorizationUrl = `${config.authUrl}?${params.toString()}`;
 
-  // Attempt to open browser automatically (best practice for CLI OAuth)
-  // Falls back to logging the URL if browser launch fails
-  console.error(
-    `[brainstew] OAuth login for ${providerId}: opening browser...`
-  );
+  // Best-effort browser open (may fail silently in MCP context — that's fine,
+  // the URL is returned in the tool response for the agent to show the user)
   try {
     const openCmd =
       process.platform === "darwin"
@@ -218,56 +241,132 @@ export async function performOAuthLogin(
           : "xdg-open";
     exec(`${openCmd} "${authorizationUrl}"`);
   } catch {
-    // Browser launch failed — user will need to open manually
-  }
-  console.error(`[brainstew] If browser didn't open, visit:\n${authorizationUrl}`);
-
-  // Start callback server and wait
-  const { code, state: returnedState, server } = await startCallbackServer(
-    config.callbackPort
-  );
-  server.close();
-
-  if (returnedState !== state) {
-    throw new Error("OAuth state mismatch — possible CSRF attack");
+    // Browser open failed — URL will be shown via tool response
   }
 
-  // Exchange code for tokens
-  const tokenParams = new URLSearchParams({
-    grant_type: "authorization_code",
-    code,
-    redirect_uri: redirectUri,
-    client_id: config.clientId,
+  // Start callback server in the background (5-minute timeout)
+  let cancelFn: () => void = () => {};
+
+  const callbackPromise = new Promise<OAuthCredentials>((resolve, reject) => {
+    const server = createServer((req, res) => {
+      const url = new URL(req.url ?? "/", `http://127.0.0.1:${config.callbackPort}`);
+      const code = url.searchParams.get("code");
+      const callbackState = url.searchParams.get("state");
+      const error = url.searchParams.get("error");
+
+      if (error) {
+        res.writeHead(400, { "Content-Type": "text/html" });
+        res.end(
+          `<html><body><h2>Authentication failed</h2><p>${error}</p><p>You can close this tab.</p></body></html>`
+        );
+        server.close();
+        reject(new Error(`OAuth error from provider: ${error}`));
+        return;
+      }
+
+      if (code && callbackState) {
+        res.writeHead(200, { "Content-Type": "text/html" });
+        res.end(
+          `<html><body><h2>Authenticated!</h2><p>You can close this tab and return to your terminal.</p></body></html>`
+        );
+        server.close();
+
+        if (callbackState !== state) {
+          reject(new Error("OAuth state mismatch — possible CSRF attack"));
+          return;
+        }
+
+        // Exchange code for tokens
+        const tokenParams = new URLSearchParams({
+          grant_type: "authorization_code",
+          code,
+          redirect_uri: redirectUri,
+          client_id: config.clientId,
+        });
+        if (codeVerifier) {
+          tokenParams.set("code_verifier", codeVerifier);
+        }
+
+        fetch(config.tokenUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: tokenParams.toString(),
+        })
+          .then(async (tokenRes) => {
+            if (!tokenRes.ok) {
+              const body = await tokenRes.text();
+              throw new Error(`Token exchange failed (${tokenRes.status}): ${body}`);
+            }
+            return tokenRes.json() as Promise<{
+              access_token: string;
+              refresh_token?: string;
+              expires_in?: number;
+            }>;
+          })
+          .then((tokenData) => {
+            resolve({
+              accessToken: tokenData.access_token,
+              refreshToken: tokenData.refresh_token,
+              expiresAt: tokenData.expires_in
+                ? Date.now() + tokenData.expires_in * 1000
+                : undefined,
+            });
+          })
+          .catch(reject);
+      }
+    });
+
+    server.listen(config.callbackPort, "127.0.0.1");
+    server.on("error", (err) => {
+      reject(new Error(`Callback server failed to start on port ${config.callbackPort}: ${err.message}`));
+    });
+
+    // 5-minute timeout (more generous than 2 min — user needs time to see URL and act)
+    const timeout = setTimeout(() => {
+      server.close();
+      reject(new Error(
+        "OAuth callback timed out after 5 minutes. The user may not have completed the browser authorization. " +
+        "Try again with brainstew_login."
+      ));
+    }, 300_000);
+
+    cancelFn = () => {
+      clearTimeout(timeout);
+      server.close();
+    };
   });
 
-  if (codeVerifier) {
-    tokenParams.set("code_verifier", codeVerifier);
-  }
-
-  const tokenRes = await fetch(config.tokenUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: tokenParams.toString(),
-  });
-
-  if (!tokenRes.ok) {
-    const body = await tokenRes.text();
-    throw new Error(`Token exchange failed (${tokenRes.status}): ${body}`);
-  }
-
-  const tokenData = (await tokenRes.json()) as {
-    access_token: string;
-    refresh_token?: string;
-    expires_in?: number;
+  const flow: PendingOAuthFlow = {
+    providerId,
+    authorizationUrl,
+    callbackPromise,
+    cancel: cancelFn,
   };
 
-  return {
-    accessToken: tokenData.access_token,
-    refreshToken: tokenData.refresh_token,
-    expiresAt: tokenData.expires_in
-      ? Date.now() + tokenData.expires_in * 1000
-      : undefined,
-  };
+  activePendingFlow = flow;
+  return flow;
+}
+
+/**
+ * Phase 2: Await the callback from the browser and store credentials.
+ */
+export async function awaitOAuthCallback(): Promise<OAuthCredentials> {
+  const flow = activePendingFlow;
+  if (!flow) {
+    throw new Error("No OAuth flow in progress. Call brainstew_login first.");
+  }
+
+  try {
+    const credentials = await flow.callbackPromise;
+    const store = await loadAuthStore();
+    store[flow.providerId] = { type: "oauth", oauth: credentials };
+    await saveAuthStore(store);
+    activePendingFlow = null;
+    return credentials;
+  } catch (err) {
+    activePendingFlow = null;
+    throw err;
+  }
 }
 
 // --- Token refresh ---

@@ -1,6 +1,6 @@
 {
   "name": "brainstew",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Multi-model deliberation MCP server — fans out prompts to GPT, Gemini, and Grok, returns structured responses for Claude to synthesize",
   "type": "module",
   "main": "dist/index.js",
