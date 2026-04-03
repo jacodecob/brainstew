@@ -71,13 +71,13 @@ async function queryGPT(prompt: string, signal?: AbortSignal): Promise<ModelResp
     // Standard API key path
     const client = new OpenAI({ apiKey: token });
     const res = await client.chat.completions.create({
-      model: "gpt-4o",
+      model: "gpt-5.4",
       messages: [{ role: "user", content: prompt }],
       max_tokens: 4096,
     }, { signal });
 
     return {
-      model: "GPT-4o (OpenAI)",
+      model: "GPT-5.4 (OpenAI)",
       response: res.choices[0]?.message?.content ?? "(empty response)",
       error: null,
       latencyMs: Date.now() - start,
@@ -175,11 +175,11 @@ async function queryGemini(prompt: string, signal?: AbortSignal): Promise<ModelR
 
     // API key path (Google AI SDK)
     const client = new GoogleGenerativeAI(token);
-    const model = client.getGenerativeModel({ model: "gemini-2.0-flash" });
+    const model = client.getGenerativeModel({ model: "gemini-3.1-pro" });
     const res = await model.generateContent(prompt, { signal });
 
     return {
-      model: "Gemini 2.0 Flash (Google)",
+      model: "Gemini 3.1 Pro (Google)",
       response: res.response.text(),
       error: null,
       latencyMs: Date.now() - start,
@@ -204,7 +204,7 @@ async function queryGeminiStandardOAuth(
   signal?: AbortSignal
 ): Promise<ModelResponse> {
   const res = await resilientFetch(
-    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro:generateContent",
     {
       method: "POST",
       headers: {
@@ -234,7 +234,7 @@ async function queryGeminiStandardOAuth(
   const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
 
   return {
-    model: "Gemini 2.0 Flash (Google)",
+    model: "Gemini 3.1 Pro (Google)",
     response: text ?? "(empty response)",
     error: null,
     latencyMs: Date.now() - start,
@@ -252,7 +252,7 @@ async function queryGeminiAntigravity(
   // Discover the Antigravity project ID (cached after first call)
   const project = await discoverAntigravityProject(token);
 
-  const model = "gemini-2.5-pro";
+  const model = "gemini-3.1-pro";
   const headers = buildAntigravityHeaders(token);
   const body = buildAntigravityBody(prompt, project, model);
 
@@ -283,7 +283,7 @@ async function queryGeminiAntigravity(
   const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
 
   return {
-    model: "Gemini 2.5 Pro (Google Antigravity)",
+    model: "Gemini 3.1 Pro (Google Antigravity)",
     response: text ?? "(empty response)",
     error: null,
     latencyMs: Date.now() - start,

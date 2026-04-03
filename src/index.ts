@@ -70,9 +70,9 @@ const server = new McpServer(
   {
     instructions:
       "Brainstew fans out prompts to GPT, Gemini, and Grok in parallel. " +
-      "Call brainstew_setup first to check which providers are ready. " +
+      "Call brainstew_setup first to check which providers are ready. If providers show as configured (via API key or OAuth), they are ready — do NOT push the user to set up OAuth when API keys are already working. " +
       "brainstew_council is the main tool — send it a prompt and optional model list. " +
-      "brainstew_login handles OAuth: use 'google-antigravity' (zero setup, recommended) for Gemini, 'openai' for ChatGPT Plus/Pro subscription, or 'google' for standard Cloud Console OAuth. " +
+      "brainstew_login is only needed when a provider is NOT configured, or the user explicitly asks to switch to OAuth. Only one login flow can be active at a time — do NOT call brainstew_login for multiple providers in parallel. " +
       "brainstew_auth_status shows credential state and expiry.",
   }
 );
@@ -278,9 +278,10 @@ server.registerTool(
   "brainstew_login",
   {
     description:
-      "Start OAuth login for a provider. Returns an authorization URL that the USER must open in their browser. After calling this, tell the user to open the URL, then call brainstew_login_callback to complete authentication.\n\n" +
+      "Start OAuth login for a provider. Only needed when a provider is not yet configured, or the user explicitly wants to switch from API key to OAuth. Do NOT call this if the provider already shows as configured in brainstew_setup.\n\n" +
+      "IMPORTANT: Only one login flow can be active at a time. Starting a new login cancels any in-progress flow. Do NOT call this for multiple providers in parallel.\n\n" +
       "Options:\n" +
-      "- 'google-antigravity': Zero-setup Google OAuth via Antigravity (recommended for Gemini)\n" +
+      "- 'google-antigravity': Zero-setup Google OAuth via Antigravity (for Gemini)\n" +
       "- 'openai': ChatGPT Plus/Pro subscription OAuth (for GPT/Codex models)\n" +
       "- 'google': Standard Google OAuth (requires GOOGLE_OAUTH_CLIENT_ID env var from Cloud Console)",
     inputSchema: {
