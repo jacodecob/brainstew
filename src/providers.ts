@@ -119,28 +119,51 @@ async function queryGPTCodex(
     throw new Error(`Codex API error (${res.status}): ${text}`);
   }
 
-  const data = (await res.json()) as {
-    output?: Array<{
-      type?: string;
-      content?: Array<{ type?: string; text?: string }>;
-    }>;
-  };
-
-  // Extract text from Responses API output format
+  // Codex backend requires stream: true — parse SSE events
+  const raw = await res.text();
   const textParts: string[] = [];
-  for (const item of data.output ?? []) {
-    if (item.type === "message" && item.content) {
-      for (const part of item.content) {
-        if (part.type === "output_text" && part.text) {
-          textParts.push(part.text);
+
+  // Try to find the response.completed event first (contains full response)
+  for (const line of raw.split("\n")) {
+    if (!line.startsWith("data: ") || line === "data: [DONE]") continue;
+    try {
+      const event = JSON.parse(line.slice(6)) as {
+        type?: string;
+        delta?: string;
+        response?: {
+          output?: Array<{
+            type?: string;
+            content?: Array<{ type?: string; text?: string }>;
+          }>;
+        };
+      };
+
+      // Collect text deltas as they arrive
+      if (event.type === "response.output_text.delta" && event.delta) {
+        textParts.push(event.delta);
+      }
+
+      // If we get the completed event, prefer its full output
+      if (event.type === "response.completed" && event.response?.output) {
+        textParts.length = 0; // clear deltas, use final response
+        for (const item of event.response.output) {
+          if (item.type === "message" && item.content) {
+            for (const part of item.content) {
+              if (part.type === "output_text" && part.text) {
+                textParts.push(part.text);
+              }
+            }
+          }
         }
       }
+    } catch {
+      // Skip unparseable lines
     }
   }
 
   return {
     model: "GPT-5.1 Codex (OpenAI)",
-    response: textParts.join("\n") || "(empty response)",
+    response: textParts.join("") || "(empty response)",
     error: null,
     latencyMs: Date.now() - start,
     authMethod: "oauth-subscription",
