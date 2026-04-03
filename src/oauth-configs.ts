@@ -286,6 +286,7 @@ export function buildCodexBody(prompt: string, model: string): object {
   return {
     model,
     instructions: prompt,
+    store: false,
     reasoning: { effort: "medium" },
     text: { verbosity: "low" },
   };
