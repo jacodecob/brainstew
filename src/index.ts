@@ -70,10 +70,10 @@ const server = new McpServer(
   {
     instructions:
       "Brainstew fans out prompts to GPT, Gemini, and Grok in parallel. " +
-      "Call brainstew_setup first to check which providers are ready. If providers show as configured (via API key or OAuth), they are ready — do NOT push the user to set up OAuth when API keys are already working. " +
+      "Call brainstew_setup first to check which providers are ready. If providers show as configured (via API key or OAuth), they are ready — do NOT push the user to set up OAuth unprompted. " +
       "brainstew_council is the main tool — send it a prompt and optional model list. " +
-      "brainstew_login is only needed when a provider is NOT configured, or the user explicitly asks to switch to OAuth. Only one login flow can be active at a time — do NOT call brainstew_login for multiple providers in parallel. " +
-      "brainstew_auth_status shows credential state and expiry.",
+      "IMPORTANT: If brainstew_council returns auth errors for a provider, the stored token may be revoked upstream even if brainstew_auth_status shows it as active. In that case, suggest re-authenticating with brainstew_login for the failing provider. Re-authenticate ONE provider at a time — only one login flow can be active at a time, never call brainstew_login in parallel. " +
+      "brainstew_auth_status shows locally-cached credential state (tokens may be revoked upstream without local expiry changing).",
   }
 );
 
@@ -541,15 +541,29 @@ function formatCouncilResults(results: ModelResponse[]): string {
     `Queried ${results.length} model(s) in parallel.\n`,
   ];
 
+  const failedModels: string[] = [];
+
   for (const result of results) {
     sections.push(`## ${result.model}`);
     if (result.error) {
       sections.push(`**Error**: ${result.error}\n`);
+      if (result.authMethod === "none") {
+        failedModels.push(result.model);
+      }
     } else {
       sections.push(`${result.response}\n`);
     }
     sections.push(
       `*Latency: ${result.latencyMs}ms | Auth: ${result.authMethod}*\n`
+    );
+  }
+
+  if (failedModels.length > 0) {
+    sections.push("---");
+    sections.push(
+      `**${failedModels.length} model(s) failed.** Tokens may be revoked upstream even if brainstew_auth_status shows them as active. ` +
+      `To fix: re-authenticate the failing provider(s) with brainstew_login (one at a time, sequentially). ` +
+      `If the error is not auth-related (e.g., 400 Bad Request), the issue may be an API format problem — check the error message above.`
     );
   }
 
