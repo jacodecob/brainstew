@@ -275,7 +275,8 @@ async function queryGeminiAntigravity(
   // Discover the Antigravity project ID (cached after first call)
   const project = await discoverAntigravityProject(token);
 
-  const model = "gemini-3.1-pro";
+  // Antigravity uses internal quality-tier model names
+  const model = "gemini-3.1-pro-high";
   const headers = buildAntigravityHeaders(token);
   const body = buildAntigravityBody(prompt, project, model);
 

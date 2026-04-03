@@ -285,11 +285,9 @@ export function buildCodexHeaders(
 export function buildCodexBody(prompt: string, model: string): object {
   return {
     model,
-    instructions: prompt,
+    input: prompt,
     stream: true,
     store: false,
-    reasoning: { effort: "medium" },
-    text: { verbosity: "low" },
   };
 }
 
