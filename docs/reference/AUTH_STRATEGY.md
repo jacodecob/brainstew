@@ -56,13 +56,16 @@ All OAuth providers use the **Authorization Code flow with PKCE** (Proof Key for
 
 ### Provider-Specific Configs
 
-| Provider | OAuth | API Key | Notes |
-|----------|-------|---------|-------|
-| OpenAI (GPT) | **Not supported** | `OPENAI_API_KEY` | OpenAI Chat Completions API is API-key only. No public OAuth. |
-| Google (Gemini) | Yes (PKCE, port 1456, scope `cloud-platform`) | `GEMINI_API_KEY` | Requires `GOOGLE_OAUTH_CLIENT_ID` from Google Cloud Console. OAuth client type must be "Desktop app". |
-| xAI (Grok) | **Not supported** | `XAI_API_KEY` | xAI does not offer OAuth |
+| Provider | Standard API OAuth | Subscription OAuth | API Key | Notes |
+|----------|-------------------|-------------------|---------|-------|
+| OpenAI (GPT/Codex) | **No** | **Yes** (Codex backend via ChatGPT Plus/Pro) | `OPENAI_API_KEY` | Standard Chat Completions API is API-key only. Codex backend accessible via subscription OAuth (opencode pattern). |
+| Google (Gemini) | Yes (PKCE, port 1456, scope `cloud-platform`) | **Yes** (Antigravity env, port 51121) | `GEMINI_API_KEY` | Standard OAuth requires `GOOGLE_OAUTH_CLIENT_ID` from Cloud Console. Antigravity OAuth uses emulated Gemini CLI client ID — zero user setup. |
+| xAI (Grok) | **No** | **No** | `XAI_API_KEY` | API-key only. |
 
-**Important:** OpenAI's `auth.openai.com` endpoints are for ChatGPT Actions/MCP servers authenticating users against *your* auth server — they do NOT issue API access tokens for Chat Completions.
+**Notes:**
+- Standard API OAuth = uses the provider's public API endpoints with OAuth tokens
+- Subscription OAuth = routes through the provider's consumer product backend, billed against personal subscription
+- See `PROVIDER_AUTH_ADVANCED.md` for Antigravity and Codex subscription OAuth implementation details
 
 ## OAuth for Agent Tools (Claude Code, Codex, etc.)
 

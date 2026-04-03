@@ -10,9 +10,12 @@ import {
   awaitOAuthCallback,
   getActivePendingFlow,
   loadAuthStore,
+} from "./auth.js";
+import {
   PROVIDER_OAUTH_CONFIGS,
   PROVIDER_AUTH_SUPPORT,
-} from "./auth.js";
+  LOGIN_PROVIDER_MAP,
+} from "./oauth-configs.js";
 
 loadProjectEnv();
 
@@ -61,11 +64,14 @@ function loadProjectEnv(): void {
 const server = new McpServer(
   {
     name: "brainstew",
-    version: "0.5.0",
+    version: "0.6.0",
   },
   {
     instructions:
-      "Brainstew is a multi-model deliberation server. Call brainstew_council to fan out a prompt to GPT, Gemini, and Grok in parallel. On first use, call brainstew_setup to check which providers are configured and guide the user through setup. Do NOT call brainstew_login unless the user explicitly asks for OAuth — most providers use API keys. Use brainstew_auth_status to check credential state.",
+      "Brainstew is a multi-model deliberation server. Call brainstew_council to fan out a prompt to GPT, Gemini, and Grok in parallel. " +
+      "On first use, call brainstew_setup to check which providers are configured and guide the user through setup. " +
+      "Use brainstew_login with 'google-antigravity' for zero-setup Google OAuth (recommended), 'openai' for ChatGPT Plus/Pro subscription OAuth, or 'google' for standard Google OAuth (requires Cloud Console). " +
+      "Use brainstew_auth_status to check credential state.",
   }
 );
 
@@ -103,7 +109,7 @@ server.registerTool(
             error: z.string().nullable().describe("Error message, or null on success"),
             latencyMs: z.number().describe("Response latency in milliseconds"),
             authMethod: z
-              .enum(["oauth", "apikey", "none"])
+              .enum(["oauth", "oauth-subscription", "apikey", "none"])
               .describe("Authentication method used"),
           })
         )
@@ -163,7 +169,7 @@ server.registerTool(
   "brainstew_setup",
   {
     description:
-      "Check which providers are configured and guide setup. Call this on first use or when providers return auth errors. Shows what's configured, what's missing, and tells the user exactly what env vars to set. Do NOT call brainstew_login instead — most providers require API keys, not OAuth.",
+      "Check which providers are configured and guide setup. Call this on first use or when providers return auth errors. Shows what's configured, what's missing, and tells the user exactly what to do next.",
     annotations: {
       readOnlyHint: true,
     },
@@ -177,25 +183,56 @@ server.registerTool(
 
     for (const [id, info] of Object.entries(PROVIDER_AUTH_SUPPORT)) {
       const hasEnvKey = !!process.env[info.envVar];
-      const stored = store[id];
-      const oauthActive =
-        stored?.type === "oauth" &&
-        stored.oauth?.accessToken &&
-        (!stored.oauth.expiresAt || stored.oauth.expiresAt > Date.now());
-      const hasStoredKey = stored?.type === "apikey" && !!stored.apiKey;
+
+      // Check all OAuth configs for this provider
+      let oauthActive = false;
+      let oauthMethod = "";
+      for (const oauthId of info.oauthProviderIds) {
+        const stored = store[oauthId];
+        if (
+          stored?.type === "oauth" &&
+          stored.oauth?.accessToken &&
+          (!stored.oauth.expiresAt || stored.oauth.expiresAt > Date.now())
+        ) {
+          oauthActive = true;
+          oauthMethod =
+            oauthId === "google_antigravity"
+              ? "OAuth (Antigravity)"
+              : oauthId === "openai_codex"
+                ? "OAuth (ChatGPT subscription)"
+                : "OAuth";
+          break;
+        }
+      }
+
+      const hasStoredKey = store[id]?.type === "apikey" && !!store[id].apiKey;
 
       if (oauthActive || hasEnvKey || hasStoredKey) {
         const method = oauthActive
-          ? "OAuth"
+          ? oauthMethod
           : hasEnvKey
             ? `API key (${info.envVar})`
             : "API key (stored)";
         configured.push(`- **${info.name}**: ${method}`);
       } else {
-        const howTo = info.oauth
-          ? `Set \`${info.envVar}\` env var (${info.keyUrl}), or use \`brainstew_login\` for OAuth`
-          : `Set \`${info.envVar}\` env var — get a key at ${info.keyUrl}`;
-        missing.push(`- **${info.name}**: ${howTo}`);
+        const howToParts: string[] = [];
+        if (info.oauthProviderIds.includes("google_antigravity")) {
+          howToParts.push(
+            "`brainstew_login` with `google-antigravity` (zero setup, recommended)"
+          );
+        }
+        if (info.oauthProviderIds.includes("openai_codex")) {
+          howToParts.push(
+            "`brainstew_login` with `openai` (uses ChatGPT Plus/Pro subscription)"
+          );
+        }
+        if (info.oauthProviderIds.includes("google")) {
+          howToParts.push(
+            "`brainstew_login` with `google` (requires Cloud Console client ID)"
+          );
+        }
+        howToParts.push(`Set \`${info.envVar}\` env var (${info.keyUrl})`);
+        missing.push(`- **${info.name}**: ${howToParts.join(", or ")}`);
       }
     }
 
@@ -210,11 +247,12 @@ server.registerTool(
       lines.push(...missing);
       lines.push("");
       lines.push(
-        "**To configure:** Ask the user to set the env vars listed above, then restart the MCP server. " +
-          "The user can add env vars to the MCP config in Claude Code settings, or to a `.env` file in the project."
+        "**To configure:** Call `brainstew_login` with the recommended provider, or ask the user to set env vars and restart the MCP server."
       );
     } else {
-      lines.push("All providers are configured. Run `brainstew_council` to start deliberating.");
+      lines.push(
+        "All providers are configured. Run `brainstew_council` to start deliberating."
+      );
     }
 
     return {
@@ -229,12 +267,16 @@ server.registerTool(
   "brainstew_login",
   {
     description:
-      "Start OAuth login for a provider. Returns an authorization URL that the USER must open in their browser. After calling this, tell the user to open the URL, then call brainstew_login_callback to complete authentication. Only Google supports OAuth — OpenAI and xAI require API keys (use brainstew_setup).",
+      "Start OAuth login for a provider. Returns an authorization URL that the USER must open in their browser. After calling this, tell the user to open the URL, then call brainstew_login_callback to complete authentication.\n\n" +
+      "Options:\n" +
+      "- 'google-antigravity': Zero-setup Google OAuth via Antigravity (recommended for Gemini)\n" +
+      "- 'openai': ChatGPT Plus/Pro subscription OAuth (for GPT/Codex models)\n" +
+      "- 'google': Standard Google OAuth (requires GOOGLE_OAUTH_CLIENT_ID env var from Cloud Console)",
     inputSchema: {
       provider: z
-        .enum(["google"])
+        .enum(["google", "google-antigravity", "openai"])
         .describe(
-          "Which provider to authenticate with via OAuth. Only Google is supported."
+          "Which provider to authenticate with. Use 'google-antigravity' for zero-setup Gemini access, 'openai' for ChatGPT subscription, or 'google' for standard Google OAuth."
         ),
     },
     annotations: {
@@ -243,43 +285,65 @@ server.registerTool(
     },
   },
   async ({ provider }) => {
-    const config = PROVIDER_OAUTH_CONFIGS[provider];
+    // Map user-facing name to internal OAuth config ID
+    const internalId = LOGIN_PROVIDER_MAP[provider];
+    if (!internalId) {
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text" as const,
+            text: `Unknown provider "${provider}". Use 'google-antigravity', 'openai', or 'google'.`,
+          },
+        ],
+      };
+    }
+
+    const config = PROVIDER_OAUTH_CONFIGS[internalId];
     if (!config) {
       return {
         isError: true,
         content: [
           {
             type: "text" as const,
-            text: `Provider "${provider}" does not support OAuth. Run brainstew_setup for configuration guidance.`,
+            text: `Provider "${provider}" does not have an OAuth configuration. Run brainstew_setup for guidance.`,
           },
         ],
       };
     }
 
-    if (!config.clientId) {
-      const info = PROVIDER_AUTH_SUPPORT[provider];
+    // For standard Google OAuth, require a client ID from env
+    if (internalId === "google" && !config.clientId) {
       return {
         isError: true,
         content: [
           {
             type: "text" as const,
-            text: `OAuth for ${provider} requires a Google Cloud OAuth client ID. ` +
-              `Set the GOOGLE_OAUTH_CLIENT_ID env var first. ` +
-              (info ? `Or use an API key instead: set ${info.envVar} (${info.keyUrl}).` : ""),
+            text:
+              "Standard Google OAuth requires a Cloud Console client ID. " +
+              "Set the GOOGLE_OAUTH_CLIENT_ID env var first, or use 'google-antigravity' instead (zero setup needed).",
           },
         ],
       };
     }
 
+    // Find the friendly name
+    const friendlyName =
+      provider === "google-antigravity"
+        ? "Google Gemini (Antigravity)"
+        : provider === "openai"
+          ? "OpenAI (ChatGPT subscription)"
+          : "Google (standard OAuth)";
+
     try {
-      const flow = startOAuthLogin(provider, config);
+      const flow = startOAuthLogin(internalId, config);
 
       return {
         content: [
           {
             type: "text" as const,
             text: [
-              `## OAuth Login for ${PROVIDER_AUTH_SUPPORT[provider]?.name ?? provider}\n`,
+              `## OAuth Login for ${friendlyName}\n`,
               `**The user must open this URL in their browser to authorize:**\n`,
               flow.authorizationUrl,
               `\nA browser window may have opened automatically. If not, the user needs to copy and open the URL above.`,
@@ -294,7 +358,7 @@ server.registerTool(
         content: [
           {
             type: "text" as const,
-            text: `Failed to start OAuth flow for ${provider}: ${err instanceof Error ? err.message : String(err)}`,
+            text: `Failed to start OAuth flow for ${friendlyName}: ${err instanceof Error ? err.message : String(err)}`,
           },
         ],
       };
@@ -334,23 +398,28 @@ server.registerTool(
         ? Math.round((credentials.expiresAt - Date.now()) / 60_000)
         : "unknown";
 
+      const providerLabel =
+        flow.providerId === "google_antigravity"
+          ? "Google Gemini (Antigravity)"
+          : flow.providerId === "openai_codex"
+            ? "OpenAI (ChatGPT subscription)"
+            : flow.providerId;
+
       return {
         content: [
           {
             type: "text" as const,
-            text: `Successfully authenticated with ${flow.providerId} via OAuth. Token expires in ${expiresIn} minutes. Credentials stored securely in OS keychain.`,
+            text: `Successfully authenticated with ${providerLabel} via OAuth. Token expires in ${expiresIn} minutes. Credentials stored securely in OS keychain.`,
           },
         ],
       };
     } catch (err: unknown) {
-      const info = PROVIDER_AUTH_SUPPORT[flow.providerId];
       return {
         isError: true,
         content: [
           {
             type: "text" as const,
-            text: `OAuth callback failed: ${err instanceof Error ? err.message : String(err)}. ` +
-              (info ? `Alternative: set ${info.envVar} env var (${info.keyUrl}).` : ""),
+            text: `OAuth callback failed: ${err instanceof Error ? err.message : String(err)}. Try running brainstew_login again, or use an API key instead (see brainstew_setup).`,
           },
         ],
       };
@@ -364,7 +433,7 @@ server.registerTool(
   "brainstew_auth_status",
   {
     description:
-      "Check which providers are authenticated and how (OAuth vs API key). Shows credential status, expiration, and auth method for all providers.",
+      "Check which providers are authenticated and how (OAuth vs API key vs subscription OAuth). Shows credential status, expiration, and auth method for all providers.",
     annotations: {
       readOnlyHint: true,
     },
@@ -379,27 +448,54 @@ server.registerTool(
 
     for (const [id, info] of Object.entries(PROVIDER_AUTH_SUPPORT)) {
       const hasEnvKey = !!process.env[info.envVar];
-      const stored = store[id];
-      const oauthActive =
-        stored?.type === "oauth" &&
-        stored.oauth?.accessToken &&
-        (!stored.oauth.expiresAt || stored.oauth.expiresAt > Date.now());
+
+      // Check OAuth configs
+      let oauthStatus = "";
+      for (const oauthId of info.oauthProviderIds) {
+        const stored = store[oauthId];
+        if (
+          stored?.type === "oauth" &&
+          stored.oauth?.accessToken
+        ) {
+          const expired =
+            stored.oauth.expiresAt && stored.oauth.expiresAt < Date.now();
+          const expiresIn = stored.oauth.expiresAt
+            ? Math.round((stored.oauth.expiresAt - Date.now()) / 60_000)
+            : null;
+
+          const label =
+            oauthId === "google_antigravity"
+              ? "Antigravity"
+              : oauthId === "openai_codex"
+                ? "ChatGPT subscription"
+                : "standard";
+
+          if (expired) {
+            oauthStatus = `${label} OAuth (expired, has refresh token: ${stored.oauth.refreshToken ? "yes" : "no"})`;
+          } else {
+            oauthStatus = `${label} OAuth active${expiresIn !== null ? ` (expires in ${expiresIn} min)` : ""}`;
+          }
+          break;
+        }
+      }
+
+      const hasStoredKey = store[id]?.type === "apikey" && !!store[id].apiKey;
 
       let status: string;
-      if (oauthActive) {
-        const expiresIn = stored.oauth!.expiresAt
-          ? Math.round((stored.oauth!.expiresAt - Date.now()) / 60_000)
-          : "unknown";
-        status = `OAuth active (expires in ${expiresIn} min)`;
+      if (oauthStatus) {
+        status = oauthStatus;
       } else if (hasEnvKey) {
         status = `Ready (${info.envVar})`;
-      } else if (stored?.type === "apikey") {
+      } else if (hasStoredKey) {
         status = "Ready (stored key)";
       } else {
         status = "Not configured";
       }
 
-      const method = info.oauth ? "API key or OAuth" : "API key only";
+      const methods: string[] = [];
+      if (info.oauthProviderIds.length > 0) methods.push("OAuth");
+      if (info.apiKey) methods.push("API key");
+      const method = methods.join(" or ");
 
       lines.push(`| ${info.name} | ${status} | ${method} |`);
     }

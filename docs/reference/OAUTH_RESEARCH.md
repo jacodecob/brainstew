@@ -1,14 +1,24 @@
 # OAuth Research Findings
 
-Research conducted 2026-04-02 by auditing opencode (anomalyco/opencode), pi-mono (badlogic/pi-mono), and official provider docs.
+Research conducted 2026-04-02, updated 2026-04-03 with Gemini 3.1 Pro deep research findings.
 
-## Provider OAuth Support for API Access
+Audited: opencode (anomalyco/opencode), pi-mono (badlogic/pi-mono), official provider docs, and "Architecting a Multi-Model Council MCP Server" (Gemini deep research).
 
-| Provider | OAuth for API? | Details |
-|----------|---------------|---------|
-| **OpenAI** | **No** | Chat Completions API is API-key only. `auth.openai.com` is for ChatGPT Actions/Apps SDK, NOT for API access tokens. Codex CLI uses API keys. |
-| **Google (Gemini)** | **Yes** | Generative Language API supports OAuth bearer tokens. Use Desktop app client type. Scope: `cloud-platform`. The scope `generative-language` does NOT exist. |
-| **xAI (Grok)** | **No** | API-key only. xAI offers OAuth for data source integrations in "Grok for Business" but NOT for API auth. |
+## Provider OAuth Support — Two Tiers
+
+There are **two distinct tiers** of OAuth access for LLM providers:
+
+1. **Standard API OAuth**: Using provider's public API endpoints with OAuth tokens (e.g., Google Generative Language API)
+2. **Subscription OAuth**: Using personal subscription credentials (ChatGPT Plus/Pro, Google Antigravity) to access models via consumer product backends — bypassing API billing entirely
+
+| Provider | Standard API OAuth | Subscription OAuth | API Key |
+|----------|-------------------|-------------------|---------|
+| **OpenAI** | No (Chat Completions is API-key only) | **Yes** — Codex backend via ChatGPT Plus/Pro OAuth (opencode pattern) | `sk-...` |
+| **Google (Gemini)** | Yes (Desktop app, `cloud-platform` scope) | **Yes** — Antigravity environment OAuth (emulated IDE client) | `GEMINI_API_KEY` |
+| **xAI (Grok)** | No | No | `XAI_API_KEY` |
+
+### Correction from prior research
+Our 2026-04-02 finding that "OpenAI API is API-key only" was narrowly correct about `api.openai.com/v1/chat/completions` but **missed that Codex backend access is possible via subscription OAuth**. The opencode project (opencode-openai-codex-auth) demonstrates the ChatGPT Plus/Pro OAuth flow — this routes through the Codex backend, not the standard Chat Completions API. See `PROVIDER_AUTH_ADVANCED.md` for full details.
 
 ## Key Lessons from opencode and pi-mono
 
@@ -53,14 +63,16 @@ To enable Google Gemini OAuth:
 5. Enable the Generative Language API in the project
 6. Redirect URI: `http://127.0.0.1:1456/callback` (auto-allowed for Desktop apps)
 
-## OpenAI "OAuth" Clarification
+## OpenAI OAuth — Updated Understanding
 
-The "OAuth" support listed in opencode and pi-mono for OpenAI is for:
-- Authenticating with **ChatGPT subscriptions** (consumer product)
-- Using **OpenAI Apps SDK** for ChatGPT integrations
-- **NOT** for programmatic API access via Chat Completions
+There are **two separate OpenAI OAuth contexts**:
 
-The OpenAI API (`api.openai.com`) only accepts: `Authorization: Bearer sk-...` (API keys).
+1. **ChatGPT Actions / Apps SDK OAuth** (`auth.openai.com`): For building ChatGPT plugins and integrations. NOT for API access.
+2. **Codex CLI Subscription OAuth**: The official Codex CLI uses an OAuth flow to authenticate against the ChatGPT Plus/Pro subscription. This grants access to the **Codex backend** — a separate system from the standard Chat Completions API.
+
+The standard API (`api.openai.com`) still only accepts API keys (`sk-...`). But the Codex backend — accessible via subscription OAuth — provides model access billed against the user's ChatGPT subscription rather than API credits.
+
+**Implementation details**: JWT-based auth, specific `OPENAI_HEADERS`, variant mapping for reasoning effort levels. See `PROVIDER_AUTH_ADVANCED.md`.
 
 ## Sources
 

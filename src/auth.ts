@@ -1,9 +1,23 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { createServer, type Server } from "node:http";
+import { createServer } from "node:http";
 import { randomBytes, createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { exec } from "node:child_process";
+
+// Re-export config types and constants for backward compatibility
+export {
+  type ProviderOAuthConfig,
+  type ProviderAuthInfo,
+  PROVIDER_OAUTH_CONFIGS,
+  PROVIDER_AUTH_SUPPORT,
+} from "./oauth-configs.js";
+
+import {
+  type ProviderOAuthConfig,
+  PROVIDER_OAUTH_CONFIGS,
+  PROVIDER_AUTH_SUPPORT,
+} from "./oauth-configs.js";
 
 // --- Types ---
 
@@ -21,16 +35,6 @@ export interface StoredCredentials {
 
 export interface AuthStore {
   [providerId: string]: StoredCredentials;
-}
-
-export interface ProviderOAuthConfig {
-  authUrl: string;
-  tokenUrl: string;
-  clientId: string;
-  scopes: string[];
-  callbackPort: number;
-  // Some providers use PKCE
-  usePkce: boolean;
 }
 
 // --- Credential storage (keychain-first, file fallback) ---
@@ -126,48 +130,6 @@ function generateState(): string {
   return randomBytes(16).toString("hex");
 }
 
-// --- Local callback server ---
-
-function startCallbackServer(
-  port: number
-): Promise<{ code: string; state: string; server: Server }> {
-  return new Promise((resolve, reject) => {
-    const server = createServer((req, res) => {
-      const url = new URL(req.url ?? "/", `http://127.0.0.1:${port}`);
-      const code = url.searchParams.get("code");
-      const state = url.searchParams.get("state");
-      const error = url.searchParams.get("error");
-
-      if (error) {
-        res.writeHead(400, { "Content-Type": "text/html" });
-        res.end(
-          `<html><body><h2>Authentication failed</h2><p>${error}</p><p>You can close this tab.</p></body></html>`
-        );
-        reject(new Error(`OAuth error: ${error}`));
-        server.close();
-        return;
-      }
-
-      if (code && state) {
-        res.writeHead(200, { "Content-Type": "text/html" });
-        res.end(
-          `<html><body><h2>Authenticated!</h2><p>You can close this tab and return to your terminal.</p></body></html>`
-        );
-        resolve({ code, state, server });
-      }
-    });
-
-    server.listen(port, "127.0.0.1");
-    server.on("error", reject);
-
-    // Timeout after 2 minutes
-    setTimeout(() => {
-      server.close();
-      reject(new Error("OAuth callback timed out after 2 minutes"));
-    }, 120_000);
-  });
-}
-
 // --- OAuth flow (two-phase: start + await callback) ---
 
 export interface PendingOAuthFlow {
@@ -208,7 +170,9 @@ export function startOAuthLogin(
     ? generateCodeChallenge(codeVerifier)
     : undefined;
 
-  const redirectUri = `http://127.0.0.1:${config.callbackPort}/callback`;
+  const hostname = config.callbackHostname ?? "127.0.0.1";
+  const callbackPath = config.callbackPath ?? "/callback";
+  const redirectUri = `http://${hostname}:${config.callbackPort}${callbackPath}`;
 
   const params = new URLSearchParams({
     response_type: "code",
@@ -223,9 +187,11 @@ export function startOAuthLogin(
     params.set("code_challenge_method", "S256");
   }
 
-  if (providerId === "google") {
-    params.set("access_type", "offline");
-    params.set("prompt", "consent");
+  // Append provider-specific extra params (access_type, prompt, etc.)
+  if (config.extraAuthParams) {
+    for (const [key, value] of Object.entries(config.extraAuthParams)) {
+      params.set(key, value);
+    }
   }
 
   const authorizationUrl = `${config.authUrl}?${params.toString()}`;
@@ -249,7 +215,14 @@ export function startOAuthLogin(
 
   const callbackPromise = new Promise<OAuthCredentials>((resolve, reject) => {
     const server = createServer((req, res) => {
-      const url = new URL(req.url ?? "/", `http://127.0.0.1:${config.callbackPort}`);
+      const url = new URL(
+        req.url ?? "/",
+        `http://${hostname}:${config.callbackPort}`
+      );
+
+      // Only handle requests to the configured callback path
+      if (url.pathname !== callbackPath) return;
+
       const code = url.searchParams.get("code");
       const callbackState = url.searchParams.get("state");
       const error = url.searchParams.get("error");
@@ -286,6 +259,9 @@ export function startOAuthLogin(
         if (codeVerifier) {
           tokenParams.set("code_verifier", codeVerifier);
         }
+        if (config.clientSecret) {
+          tokenParams.set("client_secret", config.clientSecret);
+        }
 
         fetch(config.tokenUrl, {
           method: "POST",
@@ -295,7 +271,9 @@ export function startOAuthLogin(
           .then(async (tokenRes) => {
             if (!tokenRes.ok) {
               const body = await tokenRes.text();
-              throw new Error(`Token exchange failed (${tokenRes.status}): ${body}`);
+              throw new Error(
+                `Token exchange failed (${tokenRes.status}): ${body}`
+              );
             }
             return tokenRes.json() as Promise<{
               access_token: string;
@@ -318,16 +296,22 @@ export function startOAuthLogin(
 
     server.listen(config.callbackPort, "127.0.0.1");
     server.on("error", (err) => {
-      reject(new Error(`Callback server failed to start on port ${config.callbackPort}: ${err.message}`));
+      reject(
+        new Error(
+          `Callback server failed to start on port ${config.callbackPort}: ${err.message}`
+        )
+      );
     });
 
     // 5-minute timeout (more generous than 2 min — user needs time to see URL and act)
     const timeout = setTimeout(() => {
       server.close();
-      reject(new Error(
-        "OAuth callback timed out after 5 minutes. The user may not have completed the browser authorization. " +
-        "Try again with brainstew_login."
-      ));
+      reject(
+        new Error(
+          "OAuth callback timed out after 5 minutes. The user may not have completed the browser authorization. " +
+            "Try again with brainstew_login."
+        )
+      );
     }, 300_000);
 
     cancelFn = () => {
@@ -385,6 +369,10 @@ export async function refreshOAuthToken(
     client_id: config.clientId,
   });
 
+  if (config.clientSecret) {
+    params.set("client_secret", config.clientSecret);
+  }
+
   const res = await fetch(config.tokenUrl, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -414,99 +402,92 @@ export async function refreshOAuthToken(
 
 // --- Credential resolution ---
 
-export async function getAccessToken(
-  providerId: string,
-  config: ProviderOAuthConfig,
-  envApiKey?: string
-): Promise<{ token: string; type: "oauth" | "apikey" }> {
-  // Priority 1: Stored OAuth tokens (preferred — most secure, auto-refreshable)
-  const store = await loadAuthStore();
-  const creds = store[providerId];
+// Proactive refresh buffer: refresh tokens 5 minutes before expiry
+const REFRESH_BUFFER_MS = 300_000;
 
-  if (creds?.type === "oauth" && creds.oauth?.accessToken) {
-    // Check expiry with 60s buffer
+/**
+ * Resolve credentials for a logical provider ("google", "openai", "xai").
+ * Tries subscription OAuth configs first (in priority order), then standard OAuth,
+ * then stored API key, then env var API key.
+ *
+ * Returns { token, type, oauthProviderId } — oauthProviderId tells callers
+ * which specific OAuth config was used (e.g., "google_antigravity" vs "google").
+ */
+export async function resolveCredentials(
+  logicalProvider: string,
+  envApiKey?: string
+): Promise<{
+  token: string;
+  type: "oauth" | "apikey";
+  oauthProviderId?: string;
+}> {
+  const support = PROVIDER_AUTH_SUPPORT[logicalProvider];
+  const store = await loadAuthStore();
+
+  // Try each OAuth config in priority order
+  for (const oauthId of support?.oauthProviderIds ?? []) {
+    const config = PROVIDER_OAUTH_CONFIGS[oauthId];
+    const creds = store[oauthId];
+    if (!config || !creds?.oauth?.accessToken) continue;
+
     const isExpired =
-      creds.oauth.expiresAt && Date.now() > creds.oauth.expiresAt - 60_000;
+      creds.oauth.expiresAt &&
+      Date.now() > creds.oauth.expiresAt - REFRESH_BUFFER_MS;
 
     if (isExpired && creds.oauth.refreshToken) {
       try {
         const refreshed = await refreshOAuthToken(config, creds.oauth);
-        store[providerId] = { type: "oauth", oauth: refreshed };
+        store[oauthId] = { type: "oauth", oauth: refreshed };
         await saveAuthStore(store);
-        return { token: refreshed.accessToken, type: "oauth" };
+        return {
+          token: refreshed.accessToken,
+          type: "oauth",
+          oauthProviderId: oauthId,
+        };
       } catch {
-        // OAuth refresh failed — fall through to API key fallback
+        // This OAuth config's refresh failed — try next config
         console.error(
-          `[brainstew] OAuth refresh failed for ${providerId}, falling back to API key`
+          `[brainstew] OAuth refresh failed for ${oauthId}, trying next credential`
         );
+        continue;
       }
     } else if (!isExpired) {
-      return { token: creds.oauth.accessToken, type: "oauth" };
+      return {
+        token: creds.oauth.accessToken,
+        type: "oauth",
+        oauthProviderId: oauthId,
+      };
     }
   }
 
-  // Priority 2: Stored API key
+  // Stored API key (keyed by logical provider name)
+  const creds = store[logicalProvider];
   if (creds?.type === "apikey" && creds.apiKey) {
     return { token: creds.apiKey, type: "apikey" };
   }
 
-  // Priority 3: Environment variable API key (fallback)
+  // Environment variable API key (fallback)
   if (envApiKey) {
     return { token: envApiKey, type: "apikey" };
   }
 
-  const support = PROVIDER_AUTH_SUPPORT[providerId];
   const hint = support
-    ? support.oauth
+    ? support.oauthProviderIds.length > 0
       ? `Use brainstew_login to authenticate via OAuth, or set ${support.envVar} env var.`
       : `Set the ${support.envVar} env var (get a key at ${support.keyUrl}). This provider does not support OAuth.`
     : `Set the API key env var for this provider.`;
 
   throw new Error(
-    `No credentials for ${providerId}. ${hint} Run brainstew_setup for guided configuration.`
+    `No credentials for ${logicalProvider}. ${hint} Run brainstew_setup for guided configuration.`
   );
 }
 
-// --- Provider OAuth configs ---
-// Only providers that genuinely support OAuth for API access are listed here.
-// OpenAI Chat Completions API does NOT support OAuth — API key only.
-// xAI does NOT support OAuth — API key only.
-
-export const PROVIDER_OAUTH_CONFIGS: Record<string, ProviderOAuthConfig> = {
-  google: {
-    authUrl: "https://accounts.google.com/o/oauth2/v2/auth",
-    tokenUrl: "https://oauth2.googleapis.com/token",
-    clientId: process.env.GOOGLE_OAUTH_CLIENT_ID ?? "",
-    scopes: ["https://www.googleapis.com/auth/cloud-platform"],
-    callbackPort: 1456,
-    usePkce: true,
-  },
-};
-
-// Which providers support which auth methods
-export const PROVIDER_AUTH_SUPPORT: Record<
-  string,
-  { oauth: boolean; apiKey: boolean; envVar: string; name: string; keyUrl: string }
-> = {
-  openai: {
-    oauth: false,
-    apiKey: true,
-    envVar: "OPENAI_API_KEY",
-    name: "OpenAI (GPT)",
-    keyUrl: "https://platform.openai.com/api-keys",
-  },
-  google: {
-    oauth: true,
-    apiKey: true,
-    envVar: "GEMINI_API_KEY",
-    name: "Google (Gemini)",
-    keyUrl: "https://aistudio.google.com/apikey",
-  },
-  xai: {
-    oauth: false,
-    apiKey: true,
-    envVar: "XAI_API_KEY",
-    name: "xAI (Grok)",
-    keyUrl: "https://console.x.ai",
-  },
-};
+// Keep legacy getAccessToken for backward compat (thin wrapper)
+export async function getAccessToken(
+  providerId: string,
+  _config: ProviderOAuthConfig,
+  envApiKey?: string
+): Promise<{ token: string; type: "oauth" | "apikey" }> {
+  const result = await resolveCredentials(providerId, envApiKey);
+  return { token: result.token, type: result.type };
+}

@@ -1,38 +1,75 @@
 import OpenAI from "openai";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import {
-  getAccessToken,
-  PROVIDER_OAUTH_CONFIGS,
-  type OAuthCredentials,
+  resolveCredentials,
+  refreshOAuthToken,
+  loadAuthStore,
+  saveAuthStore,
 } from "./auth.js";
+import {
+  PROVIDER_OAUTH_CONFIGS,
+  ANTIGRAVITY_ENDPOINTS,
+  discoverAntigravityProject,
+  buildAntigravityHeaders,
+  buildAntigravityBody,
+  CODEX_API_ENDPOINT,
+  extractCodexAccountId,
+  buildCodexHeaders,
+  buildCodexBody,
+} from "./oauth-configs.js";
+import { resilientFetch, antigravityFetchWithFallback } from "./fetch.js";
 
 export interface ModelResponse {
   model: string;
   response: string | null;
   error: string | null;
   latencyMs: number;
-  authMethod: "oauth" | "apikey" | "none";
+  authMethod: "oauth" | "oauth-subscription" | "apikey" | "none";
 }
 
 type ModelKey = "gpt" | "gemini" | "grok";
 
+// --- Helper: build a token refresh callback for resilientFetch ---
+
+function makeRefreshCallback(
+  oauthProviderId: string
+): () => Promise<string | null> {
+  return async () => {
+    const config = PROVIDER_OAUTH_CONFIGS[oauthProviderId];
+    if (!config) return null;
+
+    const store = await loadAuthStore();
+    const creds = store[oauthProviderId];
+    if (!creds?.oauth?.refreshToken) return null;
+
+    try {
+      const refreshed = await refreshOAuthToken(config, creds.oauth);
+      store[oauthProviderId] = { type: "oauth", oauth: refreshed };
+      await saveAuthStore(store);
+      return refreshed.accessToken;
+    } catch {
+      return null;
+    }
+  };
+}
+
+// --- GPT ---
+
 async function queryGPT(prompt: string): Promise<ModelResponse> {
   const start = Date.now();
   try {
-    // OAuth first, API key fallback
-    const { token, type } = await getAccessToken(
+    const { token, type, oauthProviderId } = await resolveCredentials(
       "openai",
-      PROVIDER_OAUTH_CONFIGS.openai,
       process.env.OPENAI_API_KEY
     );
 
-    const client = new OpenAI({
-      apiKey: token,
-      ...(type === "oauth" && {
-        defaultHeaders: { Authorization: `Bearer ${token}` },
-      }),
-    });
+    // Codex subscription OAuth path
+    if (type === "oauth" && oauthProviderId === "openai_codex") {
+      return await queryGPTCodex(prompt, token, oauthProviderId, start);
+    }
 
+    // Standard API key path
+    const client = new OpenAI({ apiKey: token });
     const res = await client.chat.completions.create({
       model: "gpt-4o",
       messages: [{ role: "user", content: prompt }],
@@ -44,11 +81,11 @@ async function queryGPT(prompt: string): Promise<ModelResponse> {
       response: res.choices[0]?.message?.content ?? "(empty response)",
       error: null,
       latencyMs: Date.now() - start,
-      authMethod: type,
+      authMethod: "apikey",
     };
   } catch (err: unknown) {
     return {
-      model: "GPT-4o (OpenAI)",
+      model: "GPT (OpenAI)",
       response: null,
       error: err instanceof Error ? err.message : String(err),
       latencyMs: Date.now() - start,
@@ -57,54 +94,83 @@ async function queryGPT(prompt: string): Promise<ModelResponse> {
   }
 }
 
+async function queryGPTCodex(
+  prompt: string,
+  token: string,
+  oauthProviderId: string,
+  start: number
+): Promise<ModelResponse> {
+  const accountId = extractCodexAccountId(token);
+  const headers = buildCodexHeaders(token, accountId);
+  const body = buildCodexBody(prompt, "gpt-5.1-codex");
+
+  const res = await resilientFetch(CODEX_API_ENDPOINT, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+  }, {
+    refreshToken: makeRefreshCallback(oauthProviderId),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Codex API error (${res.status}): ${text}`);
+  }
+
+  const data = (await res.json()) as {
+    output?: Array<{
+      type?: string;
+      content?: Array<{ type?: string; text?: string }>;
+    }>;
+  };
+
+  // Extract text from Responses API output format
+  const textParts: string[] = [];
+  for (const item of data.output ?? []) {
+    if (item.type === "message" && item.content) {
+      for (const part of item.content) {
+        if (part.type === "output_text" && part.text) {
+          textParts.push(part.text);
+        }
+      }
+    }
+  }
+
+  return {
+    model: "GPT-5.1 Codex (OpenAI)",
+    response: textParts.join("\n") || "(empty response)",
+    error: null,
+    latencyMs: Date.now() - start,
+    authMethod: "oauth-subscription",
+  };
+}
+
+// --- Gemini ---
+
 async function queryGemini(prompt: string): Promise<ModelResponse> {
   const start = Date.now();
   try {
-    // OAuth first, API key fallback
-    const { token, type } = await getAccessToken(
+    const { token, type, oauthProviderId } = await resolveCredentials(
       "google",
-      PROVIDER_OAUTH_CONFIGS.google,
       process.env.GEMINI_API_KEY
     );
 
-    if (type === "oauth") {
-      // Use REST API with OAuth bearer token (Vertex AI / Generative Language API)
-      const res = await fetch(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }],
-          }),
-        }
-      );
-
-      if (!res.ok) {
-        const body = await res.text();
-        throw new Error(`Gemini API error (${res.status}): ${body}`);
-      }
-
-      const data = (await res.json()) as {
-        candidates?: Array<{
-          content?: { parts?: Array<{ text?: string }> };
-        }>;
-      };
-      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-
-      return {
-        model: "Gemini 2.0 Flash (Google)",
-        response: text ?? "(empty response)",
-        error: null,
-        latencyMs: Date.now() - start,
-        authMethod: "oauth",
-      };
+    // Antigravity subscription OAuth path
+    if (type === "oauth" && oauthProviderId === "google_antigravity") {
+      return await queryGeminiAntigravity(prompt, token, oauthProviderId, start);
     }
 
-    // API key path
+    // Standard Google OAuth path (Generative Language API with bearer token)
+    if (type === "oauth") {
+      return await queryGeminiStandardOAuth(
+        prompt,
+        token,
+        oauthProviderId ?? "google",
+        start
+      );
+    }
+
+    // API key path (Google AI SDK)
     const client = new GoogleGenerativeAI(token);
     const model = client.getGenerativeModel({ model: "gemini-2.0-flash" });
     const res = await model.generateContent(prompt);
@@ -118,7 +184,7 @@ async function queryGemini(prompt: string): Promise<ModelResponse> {
     };
   } catch (err: unknown) {
     return {
-      model: "Gemini 2.0 Flash (Google)",
+      model: "Gemini (Google)",
       response: null,
       error: err instanceof Error ? err.message : String(err),
       latencyMs: Date.now() - start,
@@ -126,6 +192,99 @@ async function queryGemini(prompt: string): Promise<ModelResponse> {
     };
   }
 }
+
+async function queryGeminiStandardOAuth(
+  prompt: string,
+  token: string,
+  oauthProviderId: string,
+  start: number
+): Promise<ModelResponse> {
+  const res = await resilientFetch(
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+      }),
+    },
+    {
+      refreshToken: makeRefreshCallback(oauthProviderId),
+    }
+  );
+
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Gemini API error (${res.status}): ${body}`);
+  }
+
+  const data = (await res.json()) as {
+    candidates?: Array<{
+      content?: { parts?: Array<{ text?: string }> };
+    }>;
+  };
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+
+  return {
+    model: "Gemini 2.0 Flash (Google)",
+    response: text ?? "(empty response)",
+    error: null,
+    latencyMs: Date.now() - start,
+    authMethod: "oauth",
+  };
+}
+
+async function queryGeminiAntigravity(
+  prompt: string,
+  token: string,
+  oauthProviderId: string,
+  start: number
+): Promise<ModelResponse> {
+  // Discover the Antigravity project ID (cached after first call)
+  const project = await discoverAntigravityProject(token);
+
+  const model = "gemini-2.5-pro";
+  const headers = buildAntigravityHeaders(token);
+  const body = buildAntigravityBody(prompt, project, model);
+
+  const res = await antigravityFetchWithFallback(
+    "/v1internal:generateContent",
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    },
+    ANTIGRAVITY_ENDPOINTS,
+    {
+      refreshToken: makeRefreshCallback(oauthProviderId),
+    }
+  );
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Antigravity API error (${res.status}): ${text}`);
+  }
+
+  const data = (await res.json()) as {
+    candidates?: Array<{
+      content?: { parts?: Array<{ text?: string }> };
+    }>;
+  };
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+
+  return {
+    model: "Gemini 2.5 Pro (Google Antigravity)",
+    response: text ?? "(empty response)",
+    error: null,
+    latencyMs: Date.now() - start,
+    authMethod: "oauth-subscription",
+  };
+}
+
+// --- Grok ---
 
 async function queryGrok(prompt: string): Promise<ModelResponse> {
   const start = Date.now();
@@ -166,6 +325,8 @@ async function queryGrok(prompt: string): Promise<ModelResponse> {
     };
   }
 }
+
+// --- Concurrent dispatch ---
 
 const providers: Record<ModelKey, (prompt: string) => Promise<ModelResponse>> =
   {

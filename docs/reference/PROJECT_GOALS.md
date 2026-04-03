@@ -54,21 +54,25 @@ If OAuth fails or isn't configured for a provider, fall through to API keys sile
 
 ## Provider Support Matrix
 
-| Provider | OAuth | API Key | Notes |
-|----------|-------|---------|-------|
-| OpenAI (GPT) | **No** | Yes | OpenAI API does not support OAuth for Chat Completions — API key only |
-| Google (Gemini) | Yes (PKCE) | Yes | OAuth requires a Google Cloud OAuth client ID |
-| xAI (Grok) | **No** | Yes | xAI does not offer OAuth — API key only |
+| Provider | Standard API OAuth | Subscription OAuth | API Key | Notes |
+|----------|-------------------|-------------------|---------|-------|
+| OpenAI (GPT/Codex) | **No** | **Yes** (Codex backend) | Yes | Chat Completions API is API-key only. Codex backend accessible via ChatGPT Plus/Pro subscription OAuth. |
+| Google (Gemini) | Yes (PKCE) | **Yes** (Antigravity) | Yes | Standard OAuth requires Cloud Console client ID. Antigravity OAuth uses emulated Gemini CLI client ID (zero setup). |
+| xAI (Grok) | **No** | **No** | Yes | API-key only. |
 
-**Note:** Only Google currently supports OAuth. For OpenAI and xAI, API keys are the only option. The OAuth-first credential resolution still applies — if a stored OAuth token exists (Google), it takes priority over API keys.
+**Note:** Both Google and OpenAI support subscription-based OAuth that routes through consumer product backends, bypassing API billing. See `PROVIDER_AUTH_ADVANCED.md` for implementation details. The OAuth-first credential resolution applies to all OAuth methods — subscription or standard.
 
-## Implemented Features (v0.3.0)
+## Implemented Features (v0.6.0)
 
 - **Structured output**: `outputSchema` defined via Zod on `brainstew_council`, `structuredContent` returned alongside the text fallback. Hosts that support typed output get a clean `{ modelsQueried, responses[] }` object.
 - **Progress notifications**: Emitted per-model as each completes during parallel council queries. Host must send a `progressToken` in `_meta` to receive them.
 - **OS keychain storage**: Credentials stored via `@napi-rs/keyring` (macOS Keychain / libsecret / Windows Credential Vault). Automatic file-based fallback and migration from legacy `~/.brainstew/auth.json`.
 - **Auto browser open**: `brainstew_login` attempts to launch the system browser automatically (`open` / `xdg-open` / `start`), with URL logged to stderr as fallback.
 - **Google refresh tokens**: `access_type=offline` + `prompt=consent` ensures Google always issues a refresh token.
+- **Google Antigravity OAuth** (v0.6.0): Zero-setup Google OAuth emulating Gemini CLI. Uses hardcoded Antigravity client ID — no Cloud Console project needed. Queries frontier models via Antigravity sandbox/production endpoints.
+- **OpenAI Codex subscription OAuth** (v0.6.0): Authenticate via ChatGPT Plus/Pro subscription. Routes queries through the Codex backend at `chatgpt.com`. JWT-based auth with account ID extraction.
+- **Resilient fetch middleware** (v0.6.0): Automatic retry on 429 (with Retry-After/exponential backoff), 5xx retry, token refresh on 401/403, and Antigravity endpoint fallback.
+- **Proactive token refresh** (v0.6.0): Tokens refreshed 5 minutes before expiry (up from 60 seconds).
 
 ## MCP Spec Compliance
 
@@ -94,7 +98,10 @@ Tested via MCP Inspector CLI (`npx @modelcontextprotocol/inspector --cli`):
 
 ## Future Considerations
 
-- **Remote HTTP deployment**: Currently local stdio only. If Brainstew is ever deployed remotely, implement CIMD-based OAuth per MCP spec 2025-11-25.
+- **Remote HTTP deployment**: Currently local stdio only. If Brainstew is ever deployed remotely, implement OAuth 2.1 per MCP spec 2025-11-25 (see `OAUTH_21_MCP_SPEC.md` and `URL_ELICITATION.md`).
 - **Additional models**: When adding providers, always implement OAuth first if available.
+- **Multi-stage council**: Implement Stage 2 (Convergence/peer review) and Stage 3 (Synthesis) server-side (see `COUNCIL_ARCHITECTURE.md`).
+- **Credential rotation**: Multi-account failover per provider on rate limits (see `FETCH_MIDDLEWARE.md`).
+- **Device code flow**: Headless Codex auth via `auth.openai.com/api/accounts/deviceauth/usercode`.
 - **Elicitation**: Could use spec-native elicitation for confirming destructive actions if any are added (requires Claude Code >= 2.1.76).
 - **Sampling**: If tool logic ever needs LLM inference internally, use MCP sampling instead of shipping a separate model client.
