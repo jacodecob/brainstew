@@ -2,6 +2,7 @@
 // All provider-specific OAuth constants, request builders, and metadata.
 
 import { randomBytes } from "node:crypto";
+import { resilientFetch } from "./fetch.js";
 
 // --- Types ---
 
@@ -142,7 +143,8 @@ export async function discoverAntigravityProject(
 
   for (const endpoint of discoveryEndpoints) {
     try {
-      const res = await fetch(`${endpoint}/v1internal:loadCodeAssist`, {
+      const platformId = process.platform === "darwin" ? "MACOS" : "PLATFORM_UNSPECIFIED";
+      const res = await resilientFetch(`${endpoint}/v1internal:loadCodeAssist`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${token}`,
@@ -150,19 +152,19 @@ export async function discoverAntigravityProject(
           "User-Agent": "google-api-nodejs-client/9.15.1",
           "Client-Metadata": JSON.stringify({
             ideType: "ANTIGRAVITY",
-            platform: process.platform === "darwin" ? "MACOS" : "WINDOWS",
+            platform: platformId,
             pluginType: "GEMINI",
           }),
         },
         body: JSON.stringify({
           metadata: {
             ideType: "ANTIGRAVITY",
-            platform: process.platform === "darwin" ? "MACOS" : "WINDOWS",
+            platform: platformId,
             pluginType: "GEMINI",
           },
         }),
         signal: AbortSignal.timeout(10_000),
-      });
+      }, { maxRetries: 1 });
 
       if (!res.ok) continue;
 
@@ -233,17 +235,6 @@ export function buildAntigravityBody(
 
 export const CODEX_API_ENDPOINT =
   "https://chatgpt.com/backend-api/codex/responses";
-
-export const CODEX_MODELS = [
-  "gpt-5.1-codex",
-  "gpt-5.1-codex-max",
-  "gpt-5.1-codex-mini",
-  "gpt-5.2",
-  "gpt-5.2-codex",
-  "gpt-5.3-codex",
-  "gpt-5.4",
-  "gpt-5.4-mini",
-] as const;
 
 interface CodexJwtClaims {
   chatgpt_account_id?: string;

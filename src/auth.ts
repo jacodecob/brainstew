@@ -5,19 +5,12 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { exec } from "node:child_process";
 
-// Re-export config types and constants for backward compatibility
-export {
-  type ProviderOAuthConfig,
-  type ProviderAuthInfo,
-  PROVIDER_OAUTH_CONFIGS,
-  PROVIDER_AUTH_SUPPORT,
-} from "./oauth-configs.js";
-
 import {
   type ProviderOAuthConfig,
   PROVIDER_OAUTH_CONFIGS,
   PROVIDER_AUTH_SUPPORT,
 } from "./oauth-configs.js";
+import { resilientFetch } from "./fetch.js";
 
 // --- Types ---
 
@@ -130,6 +123,16 @@ function generateState(): string {
   return randomBytes(16).toString("hex");
 }
 
+// --- HTML safety ---
+
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 // --- OAuth flow (two-phase: start + await callback) ---
 
 export interface PendingOAuthFlow {
@@ -137,6 +140,11 @@ export interface PendingOAuthFlow {
   authorizationUrl: string;
   callbackPromise: Promise<OAuthCredentials>;
   cancel: () => void;
+  // Exposed for manual completion (Docker/SSH fallback)
+  state: string;
+  codeVerifier?: string;
+  config: ProviderOAuthConfig;
+  redirectUri: string;
 }
 
 // Track the active OAuth flow so the callback tool can await it
@@ -230,7 +238,7 @@ export function startOAuthLogin(
       if (error) {
         res.writeHead(400, { "Content-Type": "text/html" });
         res.end(
-          `<html><body><h2>Authentication failed</h2><p>${error}</p><p>You can close this tab.</p></body></html>`
+          `<html><body><h2>Authentication failed</h2><p>${escapeHtml(error)}</p><p>You can close this tab.</p></body></html>`
         );
         server.close();
         reject(new Error(`OAuth error from provider: ${error}`));
@@ -238,16 +246,21 @@ export function startOAuthLogin(
       }
 
       if (code && callbackState) {
+        if (callbackState !== state) {
+          res.writeHead(400, { "Content-Type": "text/html" });
+          res.end(
+            `<html><body><h2>Authentication failed</h2><p>State mismatch — possible CSRF attack. Please try again.</p></body></html>`
+          );
+          server.close();
+          reject(new Error("OAuth state mismatch — possible CSRF attack"));
+          return;
+        }
+
         res.writeHead(200, { "Content-Type": "text/html" });
         res.end(
           `<html><body><h2>Authenticated!</h2><p>You can close this tab and return to your terminal.</p></body></html>`
         );
         server.close();
-
-        if (callbackState !== state) {
-          reject(new Error("OAuth state mismatch — possible CSRF attack"));
-          return;
-        }
 
         // Exchange code for tokens
         const tokenParams = new URLSearchParams({
@@ -263,11 +276,11 @@ export function startOAuthLogin(
           tokenParams.set("client_secret", config.clientSecret);
         }
 
-        fetch(config.tokenUrl, {
+        resilientFetch(config.tokenUrl, {
           method: "POST",
           headers: { "Content-Type": "application/x-www-form-urlencoded" },
           body: tokenParams.toString(),
-        })
+        }, { maxRetries: 1 })
           .then(async (tokenRes) => {
             if (!tokenRes.ok) {
               const body = await tokenRes.text();
@@ -294,7 +307,7 @@ export function startOAuthLogin(
       }
     });
 
-    server.listen(config.callbackPort, "127.0.0.1");
+    server.listen(config.callbackPort, hostname);
     server.on("error", (err) => {
       reject(
         new Error(
@@ -325,6 +338,10 @@ export function startOAuthLogin(
     authorizationUrl,
     callbackPromise,
     cancel: cancelFn,
+    state,
+    codeVerifier,
+    config,
+    redirectUri,
   };
 
   activePendingFlow = flow;
@@ -351,6 +368,100 @@ export async function awaitOAuthCallback(): Promise<OAuthCredentials> {
     activePendingFlow = null;
     throw err;
   }
+}
+
+/**
+ * Manual OAuth completion fallback for environments where the localhost
+ * callback can't receive the redirect (Docker, SSH, Safari HTTPS-Only).
+ * The user pastes the full redirect URL from their browser's address bar.
+ */
+export async function completeOAuthManually(
+  callbackUrl: string
+): Promise<OAuthCredentials> {
+  const flow = activePendingFlow;
+  if (!flow) {
+    throw new Error("No OAuth flow in progress. Call brainstew_login first.");
+  }
+
+  // Cancel the callback server — we're completing manually
+  flow.cancel();
+
+  let url: URL;
+  try {
+    url = new URL(callbackUrl);
+  } catch {
+    activePendingFlow = null;
+    throw new Error(
+      "Invalid URL. Paste the full URL from the browser's address bar (it starts with http://localhost...)."
+    );
+  }
+
+  const code = url.searchParams.get("code");
+  const returnedState = url.searchParams.get("state");
+  const error = url.searchParams.get("error");
+
+  if (error) {
+    activePendingFlow = null;
+    throw new Error(`OAuth error from provider: ${error}`);
+  }
+
+  if (!code) {
+    activePendingFlow = null;
+    throw new Error(
+      "No authorization code found in the URL. Make sure you copied the full redirect URL after completing authorization."
+    );
+  }
+
+  if (returnedState !== flow.state) {
+    activePendingFlow = null;
+    throw new Error("OAuth state mismatch — possible CSRF attack. Try brainstew_login again.");
+  }
+
+  // Exchange code for tokens
+  const tokenParams = new URLSearchParams({
+    grant_type: "authorization_code",
+    code,
+    redirect_uri: flow.redirectUri,
+    client_id: flow.config.clientId,
+  });
+  if (flow.codeVerifier) {
+    tokenParams.set("code_verifier", flow.codeVerifier);
+  }
+  if (flow.config.clientSecret) {
+    tokenParams.set("client_secret", flow.config.clientSecret);
+  }
+
+  const tokenRes = await resilientFetch(flow.config.tokenUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: tokenParams.toString(),
+  }, { maxRetries: 1 });
+
+  if (!tokenRes.ok) {
+    const body = (await tokenRes.text()).slice(0, 500);
+    activePendingFlow = null;
+    throw new Error(`Token exchange failed (${tokenRes.status}): ${body}`);
+  }
+
+  const tokenData = (await tokenRes.json()) as {
+    access_token: string;
+    refresh_token?: string;
+    expires_in?: number;
+  };
+
+  const credentials: OAuthCredentials = {
+    accessToken: tokenData.access_token,
+    refreshToken: tokenData.refresh_token,
+    expiresAt: tokenData.expires_in
+      ? Date.now() + tokenData.expires_in * 1000
+      : undefined,
+  };
+
+  const store = await loadAuthStore();
+  store[flow.providerId] = { type: "oauth", oauth: credentials };
+  await saveAuthStore(store);
+  activePendingFlow = null;
+  return credentials;
 }
 
 // --- Token refresh ---
@@ -480,14 +591,4 @@ export async function resolveCredentials(
   throw new Error(
     `No credentials for ${logicalProvider}. ${hint} Run brainstew_setup for guided configuration.`
   );
-}
-
-// Keep legacy getAccessToken for backward compat (thin wrapper)
-export async function getAccessToken(
-  providerId: string,
-  _config: ProviderOAuthConfig,
-  envApiKey?: string
-): Promise<{ token: string; type: "oauth" | "apikey" }> {
-  const result = await resolveCredentials(providerId, envApiKey);
-  return { token: result.token, type: result.type };
 }

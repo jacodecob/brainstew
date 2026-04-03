@@ -8,6 +8,7 @@ import { queryAllModels, type ModelResponse } from "./providers.js";
 import {
   startOAuthLogin,
   awaitOAuthCallback,
+  completeOAuthManually,
   getActivePendingFlow,
   loadAuthStore,
 } from "./auth.js";
@@ -68,10 +69,11 @@ const server = new McpServer(
   },
   {
     instructions:
-      "Brainstew is a multi-model deliberation server. Call brainstew_council to fan out a prompt to GPT, Gemini, and Grok in parallel. " +
-      "On first use, call brainstew_setup to check which providers are configured and guide the user through setup. " +
-      "Use brainstew_login with 'google-antigravity' for zero-setup Google OAuth (recommended), 'openai' for ChatGPT Plus/Pro subscription OAuth, or 'google' for standard Google OAuth (requires Cloud Console). " +
-      "Use brainstew_auth_status to check credential state.",
+      "Brainstew fans out prompts to GPT, Gemini, and Grok in parallel. " +
+      "Call brainstew_setup first to check which providers are ready. " +
+      "brainstew_council is the main tool — send it a prompt and optional model list. " +
+      "brainstew_login handles OAuth: use 'google-antigravity' (zero setup, recommended) for Gemini, 'openai' for ChatGPT Plus/Pro subscription, or 'google' for standard Cloud Console OAuth. " +
+      "brainstew_auth_status shows credential state and expiry.",
   }
 );
 
@@ -117,6 +119,7 @@ server.registerTool(
     },
     annotations: {
       readOnlyHint: true,
+      idempotentHint: true,
       openWorldHint: true,
     },
   },
@@ -140,7 +143,7 @@ server.registerTool(
           },
         });
       }
-    });
+    }, extra.signal);
 
     const formatted = formatCouncilResults(results);
 
@@ -191,17 +194,25 @@ server.registerTool(
         const stored = store[oauthId];
         if (
           stored?.type === "oauth" &&
-          stored.oauth?.accessToken &&
-          (!stored.oauth.expiresAt || stored.oauth.expiresAt > Date.now())
+          stored.oauth?.accessToken
         ) {
-          oauthActive = true;
-          oauthMethod =
-            oauthId === "google_antigravity"
-              ? "OAuth (Antigravity)"
-              : oauthId === "openai_codex"
-                ? "OAuth (ChatGPT subscription)"
-                : "OAuth";
-          break;
+          const notExpired =
+            !stored.oauth.expiresAt || stored.oauth.expiresAt > Date.now();
+          const canRefresh = !!stored.oauth.refreshToken;
+
+          if (notExpired || canRefresh) {
+            oauthActive = true;
+            const label =
+              oauthId === "google_antigravity"
+                ? "Antigravity"
+                : oauthId === "openai_codex"
+                  ? "ChatGPT subscription"
+                  : "standard";
+            oauthMethod = notExpired
+              ? `OAuth (${label})`
+              : `OAuth (${label}, will auto-refresh)`;
+            break;
+          }
         }
       }
 
@@ -348,6 +359,7 @@ server.registerTool(
               flow.authorizationUrl,
               `\nA browser window may have opened automatically. If not, the user needs to copy and open the URL above.`,
               `\nAfter the user completes authorization in the browser, call **brainstew_login_callback** to finish authentication.`,
+              `\n**If the redirect fails** (Docker, SSH, Safari HTTPS-Only): the user should copy the full URL from the browser's address bar after authorizing, then call **brainstew_login_callback** with that URL as the \`callback_url\` parameter.`,
             ].join("\n"),
           },
         ],
@@ -372,13 +384,24 @@ server.registerTool(
   "brainstew_login_callback",
   {
     description:
-      "Complete an OAuth login started by brainstew_login. Call this AFTER the user has opened the authorization URL in their browser and completed the consent flow. This waits for the browser redirect and exchanges the code for tokens.",
+      "Complete an OAuth login started by brainstew_login. Call this AFTER the user has opened the authorization URL in their browser and completed the consent flow.\n\n" +
+      "Two modes:\n" +
+      "- **Automatic** (no params): Waits for the browser redirect to reach the localhost callback server. Works in most environments.\n" +
+      "- **Manual** (with callback_url): For Docker, SSH, or Safari HTTPS-Only environments where the localhost redirect fails. The user copies the full URL from the browser's address bar after authorizing and provides it here.",
+    inputSchema: {
+      callback_url: z
+        .string()
+        .optional()
+        .describe(
+          "Optional. If the browser redirect failed (Docker, SSH, Safari HTTPS-Only), paste the full URL from the browser's address bar here. It starts with http://localhost... and contains the authorization code."
+        ),
+    },
     annotations: {
       readOnlyHint: false,
       openWorldHint: true,
     },
   },
-  async () => {
+  async ({ callback_url }) => {
     const flow = getActivePendingFlow();
     if (!flow) {
       return {
@@ -393,7 +416,10 @@ server.registerTool(
     }
 
     try {
-      const credentials = await awaitOAuthCallback();
+      const credentials = callback_url
+        ? await completeOAuthManually(callback_url)
+        : await awaitOAuthCallback();
+
       const expiresIn = credentials.expiresAt
         ? Math.round((credentials.expiresAt - Date.now()) / 60_000)
         : "unknown";

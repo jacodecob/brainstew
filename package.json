@@ -1,6 +1,6 @@
 {
   "name": "brainstew",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Multi-model deliberation MCP server — fans out prompts to GPT, Gemini, and Grok, returns structured responses for Claude to synthesize",
   "type": "module",
   "main": "dist/index.js",
@@ -21,7 +21,8 @@
     "@google/generative-ai": "^0.24.1",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@napi-rs/keyring": "^1.2.0",
-    "openai": "^6.33.0"
+    "openai": "^6.33.0",
+    "zod": "^3.25.0"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",

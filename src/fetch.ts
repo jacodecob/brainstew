@@ -8,6 +8,7 @@ export interface ResilientFetchOptions {
   maxDelayMs?: number; // default 30000
   backoffFactor?: number; // default 2
   refreshToken?: () => Promise<string | null>; // returns new access token, or null if refresh fails
+  signal?: AbortSignal; // cancellation signal from MCP host
 }
 
 function parseRetryAfter(header: string | null): number | null {
@@ -39,8 +40,18 @@ function computeBackoff(
   return Math.min(delay, maxDelayMs);
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener("abort", () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    }, { once: true });
+  });
 }
 
 export async function resilientFetch(
@@ -57,8 +68,10 @@ export async function resilientFetch(
   let refreshAttempted = false;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    options?.signal?.throwIfAborted();
+
     try {
-      const res = await fetch(url, init);
+      const res = await fetch(url, { ...init, signal: options?.signal });
 
       // 429 Too Many Requests — retry with backoff
       if (res.status === 429 && attempt < maxRetries) {
@@ -70,7 +83,7 @@ export async function resilientFetch(
         console.error(
           `[brainstew] 429 from ${typeof url === "string" ? url : url.toString()}, retrying in ${Math.round(delayMs / 1000)}s (attempt ${attempt + 1}/${maxRetries})`
         );
-        await sleep(delayMs);
+        await sleep(delayMs, options?.signal);
         continue;
       }
 
@@ -102,7 +115,7 @@ export async function resilientFetch(
         console.error(
           `[brainstew] ${res.status} from ${typeof url === "string" ? url : url.toString()}, retrying in ${Math.round(delayMs / 1000)}s (attempt ${attempt + 1}/${maxRetries})`
         );
-        await sleep(delayMs);
+        await sleep(delayMs, options?.signal);
         continue;
       }
 
@@ -121,7 +134,7 @@ export async function resilientFetch(
         console.error(
           `[brainstew] Network error, retrying in ${Math.round(delayMs / 1000)}s (attempt ${attempt + 1}/${maxRetries}): ${lastError.message}`
         );
-        await sleep(delayMs);
+        await sleep(delayMs, options?.signal);
         continue;
       }
     }

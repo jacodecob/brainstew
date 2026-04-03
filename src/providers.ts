@@ -55,7 +55,7 @@ function makeRefreshCallback(
 
 // --- GPT ---
 
-async function queryGPT(prompt: string): Promise<ModelResponse> {
+async function queryGPT(prompt: string, signal?: AbortSignal): Promise<ModelResponse> {
   const start = Date.now();
   try {
     const { token, type, oauthProviderId } = await resolveCredentials(
@@ -65,7 +65,7 @@ async function queryGPT(prompt: string): Promise<ModelResponse> {
 
     // Codex subscription OAuth path
     if (type === "oauth" && oauthProviderId === "openai_codex") {
-      return await queryGPTCodex(prompt, token, oauthProviderId, start);
+      return await queryGPTCodex(prompt, token, oauthProviderId, start, signal);
     }
 
     // Standard API key path
@@ -74,7 +74,7 @@ async function queryGPT(prompt: string): Promise<ModelResponse> {
       model: "gpt-4o",
       messages: [{ role: "user", content: prompt }],
       max_tokens: 4096,
-    });
+    }, { signal });
 
     return {
       model: "GPT-4o (OpenAI)",
@@ -98,7 +98,8 @@ async function queryGPTCodex(
   prompt: string,
   token: string,
   oauthProviderId: string,
-  start: number
+  start: number,
+  signal?: AbortSignal
 ): Promise<ModelResponse> {
   const accountId = extractCodexAccountId(token);
   const headers = buildCodexHeaders(token, accountId);
@@ -110,10 +111,11 @@ async function queryGPTCodex(
     body: JSON.stringify(body),
   }, {
     refreshToken: makeRefreshCallback(oauthProviderId),
+    signal,
   });
 
   if (!res.ok) {
-    const text = await res.text();
+    const text = (await res.text()).slice(0, 500);
     throw new Error(`Codex API error (${res.status}): ${text}`);
   }
 
@@ -147,7 +149,7 @@ async function queryGPTCodex(
 
 // --- Gemini ---
 
-async function queryGemini(prompt: string): Promise<ModelResponse> {
+async function queryGemini(prompt: string, signal?: AbortSignal): Promise<ModelResponse> {
   const start = Date.now();
   try {
     const { token, type, oauthProviderId } = await resolveCredentials(
@@ -157,7 +159,7 @@ async function queryGemini(prompt: string): Promise<ModelResponse> {
 
     // Antigravity subscription OAuth path
     if (type === "oauth" && oauthProviderId === "google_antigravity") {
-      return await queryGeminiAntigravity(prompt, token, oauthProviderId, start);
+      return await queryGeminiAntigravity(prompt, token, oauthProviderId, start, signal);
     }
 
     // Standard Google OAuth path (Generative Language API with bearer token)
@@ -166,14 +168,15 @@ async function queryGemini(prompt: string): Promise<ModelResponse> {
         prompt,
         token,
         oauthProviderId ?? "google",
-        start
+        start,
+        signal
       );
     }
 
     // API key path (Google AI SDK)
     const client = new GoogleGenerativeAI(token);
     const model = client.getGenerativeModel({ model: "gemini-2.0-flash" });
-    const res = await model.generateContent(prompt);
+    const res = await model.generateContent(prompt, { signal });
 
     return {
       model: "Gemini 2.0 Flash (Google)",
@@ -197,7 +200,8 @@ async function queryGeminiStandardOAuth(
   prompt: string,
   token: string,
   oauthProviderId: string,
-  start: number
+  start: number,
+  signal?: AbortSignal
 ): Promise<ModelResponse> {
   const res = await resilientFetch(
     "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
@@ -213,11 +217,12 @@ async function queryGeminiStandardOAuth(
     },
     {
       refreshToken: makeRefreshCallback(oauthProviderId),
+      signal,
     }
   );
 
   if (!res.ok) {
-    const body = await res.text();
+    const body = (await res.text()).slice(0, 500);
     throw new Error(`Gemini API error (${res.status}): ${body}`);
   }
 
@@ -241,7 +246,8 @@ async function queryGeminiAntigravity(
   prompt: string,
   token: string,
   oauthProviderId: string,
-  start: number
+  start: number,
+  signal?: AbortSignal
 ): Promise<ModelResponse> {
   // Discover the Antigravity project ID (cached after first call)
   const project = await discoverAntigravityProject(token);
@@ -260,11 +266,12 @@ async function queryGeminiAntigravity(
     ANTIGRAVITY_ENDPOINTS,
     {
       refreshToken: makeRefreshCallback(oauthProviderId),
+      signal,
     }
   );
 
   if (!res.ok) {
-    const text = await res.text();
+    const text = (await res.text()).slice(0, 500);
     throw new Error(`Antigravity API error (${res.status}): ${text}`);
   }
 
@@ -286,19 +293,13 @@ async function queryGeminiAntigravity(
 
 // --- Grok ---
 
-async function queryGrok(prompt: string): Promise<ModelResponse> {
+async function queryGrok(prompt: string, signal?: AbortSignal): Promise<ModelResponse> {
   const start = Date.now();
   try {
-    // xAI does not support OAuth — API key only
-    const apiKey = process.env.XAI_API_KEY;
-    if (!apiKey) {
-      throw new Error(
-        "XAI_API_KEY not set. xAI does not support OAuth — API key required."
-      );
-    }
+    const { token } = await resolveCredentials("xai", process.env.XAI_API_KEY);
 
     const client = new OpenAI({
-      apiKey,
+      apiKey: token,
       baseURL: "https://api.x.ai/v1",
     });
 
@@ -306,7 +307,7 @@ async function queryGrok(prompt: string): Promise<ModelResponse> {
       model: "grok-3",
       messages: [{ role: "user", content: prompt }],
       max_tokens: 4096,
-    });
+    }, { signal });
 
     return {
       model: "Grok 3 (xAI)",
@@ -328,7 +329,7 @@ async function queryGrok(prompt: string): Promise<ModelResponse> {
 
 // --- Concurrent dispatch ---
 
-const providers: Record<ModelKey, (prompt: string) => Promise<ModelResponse>> =
+const providers: Record<ModelKey, (prompt: string, signal?: AbortSignal) => Promise<ModelResponse>> =
   {
     gpt: queryGPT,
     gemini: queryGemini,
@@ -338,17 +339,30 @@ const providers: Record<ModelKey, (prompt: string) => Promise<ModelResponse>> =
 export async function queryAllModels(
   prompt: string,
   models: ModelKey[],
-  onModelComplete?: (completed: number, total: number, model: string) => void
+  onModelComplete?: (completed: number, total: number, model: string) => void,
+  signal?: AbortSignal
 ): Promise<ModelResponse[]> {
   const total = models.length;
   let completed = 0;
 
   const queries = models.map(async (key) => {
-    const result = await providers[key](prompt);
+    const result = await providers[key](prompt, signal);
     completed++;
     onModelComplete?.(completed, total, result.model);
     return result;
   });
 
-  return Promise.all(queries);
+  const settled = await Promise.allSettled(queries);
+
+  return settled.map((outcome, i) => {
+    if (outcome.status === "fulfilled") return outcome.value;
+    // Unexpected rejection — wrap as error response
+    return {
+      model: `${models[i]} (unknown)`,
+      response: null,
+      error: outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason),
+      latencyMs: 0,
+      authMethod: "none" as const,
+    };
+  });
 }
