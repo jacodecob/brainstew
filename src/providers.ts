@@ -252,7 +252,7 @@ async function queryGeminiAntigravity(
   // Discover the Antigravity project ID (cached after first call)
   const project = await discoverAntigravityProject(token);
 
-  const model = "gemini-2.5-pro";
+  const model = "gemini-3.1-pro";
   const headers = buildAntigravityHeaders(token);
   const body = buildAntigravityBody(prompt, project, model);
 
@@ -283,7 +283,7 @@ async function queryGeminiAntigravity(
   const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
 
   return {
-    model: "Gemini 2.5 Pro (Google Antigravity)",
+    model: "Gemini 3.1 Pro (Google Antigravity)",
     response: text ?? "(empty response)",
     error: null,
     latencyMs: Date.now() - start,
